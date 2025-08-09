@@ -1,0 +1,10 @@
+server: "quic://localhost:7843"
+plugins:
+  cpu:
+    enable: true
+    period: 5s
+  ebpf:
+    enable: true
+cache:
+  path: /tmp/edge_agent.cache
+  max_size: 50MB
