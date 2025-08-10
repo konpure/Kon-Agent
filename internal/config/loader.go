@@ -7,12 +7,9 @@ import (
 )
 
 type Config struct {
-	Server  string `yaml:"server"`
-	Plugins struct {
-		CPU     PluginConf `yaml:"cpu"`
-		EBPFTCP PluginConf `yaml:"ebpf"`
-	} `yaml:"plugins"`
-	Cache struct {
+	Server  string                `yaml:"server"`
+	Plugins map[string]PluginConf `yaml:"plugins"`
+	Cache   struct {
 		Path    string `yaml:"path"`
 		MaxSize string `yaml:"max_size"`
 	} `yaml:"cache"`
