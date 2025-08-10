@@ -10,22 +10,34 @@ import (
 )
 
 type Collector struct {
-	stop chan struct{}
+	config plugin.PluginConfig
+	stop   chan struct{}
 }
 
-func New() plugin.Plugin {
-	return &Collector{stop: make(chan struct{})}
+func New(config plugin.PluginConfig) plugin.Plugin {
+	return &Collector{
+		config: config,
+		stop:   make(chan struct{}),
+	}
+}
+
+func init() {
+	plugin.Register("cpu", New)
 }
 
 func (c *Collector) Name() string {
 	return "cpu"
+}
+
+func (c *Collector) Config() plugin.PluginConfig {
+	return c.config
 }
 func (c *Collector) Stop() error {
 	close(c.stop)
 	return nil
 }
 func (c *Collector) Run(out chan<- plugin.Event) error {
-	tk := time.NewTicker(5 * time.Second)
+	tk := time.NewTicker(c.config.Period)
 	defer tk.Stop()
 	for {
 		select {

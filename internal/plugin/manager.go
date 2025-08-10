@@ -2,7 +2,6 @@ package plugin
 
 import (
 	"github.com/konpure/Kon-Agent/internal/config"
-	"github.com/konpure/Kon-Agent/internal/plugin/system/cpu"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
 	"log/slog"
 )
@@ -15,8 +14,18 @@ type Manager struct {
 // NewManager add plugins which is enabled
 func NewManager(cfg *config.Config) *Manager {
 	m := &Manager{out: make(chan plugin.Event, 100)}
-	if cfg.Plugins.CPU.Enable {
-		m.plugins = append(m.plugins, cpu.New())
+	for name, pluginConf := range cfg.Plugins {
+		if pluginConf.Enable {
+			factory, exists := plugin.GetFactory(name)
+			if !exists {
+				slog.Warn("Unknown plugin type", "name", name)
+				continue
+			}
+
+			pluginInstance := factory(pluginConf)
+			m.plugins = append(m.plugins, pluginInstance)
+			slog.Info("Loaded plugin", "name", pluginInstance.Name())
+		}
 	}
 	return m
 }

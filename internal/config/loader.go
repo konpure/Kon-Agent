@@ -1,23 +1,18 @@
 package config
 
 import (
+	"github.com/konpure/Kon-Agent/pkg/plugin"
 	"gopkg.in/yaml.v3"
 	"os"
-	"time"
 )
 
 type Config struct {
-	Server  string                `yaml:"server"`
-	Plugins map[string]PluginConf `yaml:"plugins"`
+	Server  string                         `yaml:"server"`
+	Plugins map[string]plugin.PluginConfig `yaml:"plugins"`
 	Cache   struct {
 		Path    string `yaml:"path"`
 		MaxSize string `yaml:"max_size"`
 	} `yaml:"cache"`
-}
-
-type PluginConf struct {
-	Enable bool          `yaml:"enable"`
-	Period time.Duration `yaml:"period"`
 }
 
 func Load(path string) (*Config, error) {
