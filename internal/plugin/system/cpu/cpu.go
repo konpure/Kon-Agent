@@ -2,6 +2,7 @@ package cpu
 
 import (
 	"bufio"
+	"context"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
 	"os"
 	"strconv"
@@ -36,7 +37,7 @@ func (c *Collector) Stop() error {
 	close(c.stop)
 	return nil
 }
-func (c *Collector) Run(out chan<- plugin.Event) error {
+func (c *Collector) Run(ctx context.Context, out chan<- plugin.Event) error {
 	tk := time.NewTicker(c.config.Period)
 	defer tk.Stop()
 	for {
@@ -52,6 +53,8 @@ func (c *Collector) Run(out chan<- plugin.Event) error {
 				Labels: map[string]string{"mode": "user"},
 				Values: v,
 			}
+		case <-ctx.Done():
+			return nil
 		case <-c.stop:
 			return nil
 		}

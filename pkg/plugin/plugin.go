@@ -1,6 +1,9 @@
 package plugin
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type Event struct {
 	Name   string
@@ -13,7 +16,7 @@ type PluginFactory func(config PluginConfig) Plugin
 
 type Plugin interface {
 	Name() string
-	Run(out chan<- Event) error
+	Run(ctx context.Context, out chan<- Event) error
 	Stop() error
 	Config() PluginConfig
 }

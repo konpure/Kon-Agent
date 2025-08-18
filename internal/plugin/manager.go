@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"github.com/konpure/Kon-Agent/internal/config"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
 	"log/slog"
@@ -31,7 +32,7 @@ func NewManager(cfg *config.Config) *Manager {
 }
 
 // Start method run plugins in m.plugins
-func (m *Manager) Start() {
+func (m *Manager) Start(ctx context.Context) {
 	for _, p := range m.plugins {
 		go func(p1 plugin.Plugin) {
 			defer func() {
@@ -39,7 +40,7 @@ func (m *Manager) Start() {
 					slog.Error("plugin panic", "plugin", p1.Name(), "err", r)
 				}
 			}()
-			if err := p1.Run(m.out); err != nil {
+			if err := p1.Run(ctx, m.out); err != nil {
 				slog.Error("plugin exited with error", "plugin", p1.Name(), "err", err)
 			}
 		}(p)

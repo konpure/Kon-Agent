@@ -27,11 +27,11 @@ func New(cfg *config.Config) *Core {
 func (c *Core) Run() error {
 	slog.Info("Agent started", "config", c.cfg)
 
-	c.plugins.Start()
-
 	// Setup signal handling for shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	c.plugins.Start(ctx)
 
 	go func(ctx context.Context) {
 		for {
