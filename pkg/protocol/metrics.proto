@@ -1,11 +1,32 @@
 syntax = "proto3";
-package metrics;
+package protocol;
 
 option go_package = "github.com/konpure/Kon-Agent/pkg/protocol";
+
+enum MetricType {
+  CPU_USAGE = 0;
+  MEMORY_USAGE = 1;
+  NETWORK_PACKETS = 2;
+  EBPF_RAW = 3;
+}
 
 message Metric {
   int64 timestamp = 1;
   string name = 2;
   double value = 3;
   map<string, string> labels = 4;
+  MetricType type = 5;
+  bytes payload = 6;
+}
+
+message MetricsRequest {
+  string agent_id = 1;
+}
+
+message MetricsResponse {
+  repeated Metric metrics = 1;
+}
+
+service MetricsService {
+  rpc StreamMetrics (stream MetricsRequest) returns (stream MetricsResponse);
 }

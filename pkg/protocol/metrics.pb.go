@@ -21,12 +21,66 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type MetricType int32
+
+const (
+	MetricType_CPU_USAGE       MetricType = 0
+	MetricType_MEMORY_USAGE    MetricType = 1
+	MetricType_NETWORK_PACKETS MetricType = 2
+	MetricType_EBPF_RAW        MetricType = 3
+)
+
+// Enum value maps for MetricType.
+var (
+	MetricType_name = map[int32]string{
+		0: "CPU_USAGE",
+		1: "MEMORY_USAGE",
+		2: "NETWORK_PACKETS",
+		3: "EBPF_RAW",
+	}
+	MetricType_value = map[string]int32{
+		"CPU_USAGE":       0,
+		"MEMORY_USAGE":    1,
+		"NETWORK_PACKETS": 2,
+		"EBPF_RAW":        3,
+	}
+)
+
+func (x MetricType) Enum() *MetricType {
+	p := new(MetricType)
+	*p = x
+	return p
+}
+
+func (x MetricType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (MetricType) Descriptor() protoreflect.EnumDescriptor {
+	return file_pkg_protocol_metrics_proto_enumTypes[0].Descriptor()
+}
+
+func (MetricType) Type() protoreflect.EnumType {
+	return &file_pkg_protocol_metrics_proto_enumTypes[0]
+}
+
+func (x MetricType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use MetricType.Descriptor instead.
+func (MetricType) EnumDescriptor() ([]byte, []int) {
+	return file_pkg_protocol_metrics_proto_rawDescGZIP(), []int{0}
+}
+
 type Metric struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Timestamp     int64                  `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	Value         float64                `protobuf:"fixed64,3,opt,name=value,proto3" json:"value,omitempty"`
 	Labels        map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Type          MetricType             `protobuf:"varint,5,opt,name=type,proto3,enum=protocol.MetricType" json:"type,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -89,19 +143,135 @@ func (x *Metric) GetLabels() map[string]string {
 	return nil
 }
 
+func (x *Metric) GetType() MetricType {
+	if x != nil {
+		return x.Type
+	}
+	return MetricType_CPU_USAGE
+}
+
+func (x *Metric) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+type MetricsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AgentId       string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetricsRequest) Reset() {
+	*x = MetricsRequest{}
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetricsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetricsRequest) ProtoMessage() {}
+
+func (x *MetricsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetricsRequest.ProtoReflect.Descriptor instead.
+func (*MetricsRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_metrics_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *MetricsRequest) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
+	}
+	return ""
+}
+
+type MetricsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Metrics       []*Metric              `protobuf:"bytes,1,rep,name=metrics,proto3" json:"metrics,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetricsResponse) Reset() {
+	*x = MetricsResponse{}
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetricsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetricsResponse) ProtoMessage() {}
+
+func (x *MetricsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetricsResponse.ProtoReflect.Descriptor instead.
+func (*MetricsResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_metrics_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *MetricsResponse) GetMetrics() []*Metric {
+	if x != nil {
+		return x.Metrics
+	}
+	return nil
+}
+
 var File_pkg_protocol_metrics_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_metrics_proto_rawDesc = "" +
 	"\n" +
-	"\x1apkg/protocol/metrics.proto\x12\ametrics\"\xc0\x01\n" +
+	"\x1apkg/protocol/metrics.proto\x12\bprotocol\"\x85\x02\n" +
 	"\x06Metric\x12\x1c\n" +
 	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
-	"\x05value\x18\x03 \x01(\x01R\x05value\x123\n" +
-	"\x06labels\x18\x04 \x03(\v2\x1b.metrics.Metric.LabelsEntryR\x06labels\x1a9\n" +
+	"\x05value\x18\x03 \x01(\x01R\x05value\x124\n" +
+	"\x06labels\x18\x04 \x03(\v2\x1c.protocol.Metric.LabelsEntryR\x06labels\x12(\n" +
+	"\x04type\x18\x05 \x01(\x0e2\x14.protocol.MetricTypeR\x04type\x12\x18\n" +
+	"\apayload\x18\x06 \x01(\fR\apayload\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B+Z)github.com/konpure/Kon-Agent/pkg/protocolb\x06proto3"
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"+\n" +
+	"\x0eMetricsRequest\x12\x19\n" +
+	"\bagent_id\x18\x01 \x01(\tR\aagentId\"=\n" +
+	"\x0fMetricsResponse\x12*\n" +
+	"\ametrics\x18\x01 \x03(\v2\x10.protocol.MetricR\ametrics*P\n" +
+	"\n" +
+	"MetricType\x12\r\n" +
+	"\tCPU_USAGE\x10\x00\x12\x10\n" +
+	"\fMEMORY_USAGE\x10\x01\x12\x13\n" +
+	"\x0fNETWORK_PACKETS\x10\x02\x12\f\n" +
+	"\bEBPF_RAW\x10\x032Z\n" +
+	"\x0eMetricsService\x12H\n" +
+	"\rStreamMetrics\x12\x18.protocol.MetricsRequest\x1a\x19.protocol.MetricsResponse(\x010\x01B+Z)github.com/konpure/Kon-Agent/pkg/protocolb\x06proto3"
 
 var (
 	file_pkg_protocol_metrics_proto_rawDescOnce sync.Once
@@ -115,18 +285,26 @@ func file_pkg_protocol_metrics_proto_rawDescGZIP() []byte {
 	return file_pkg_protocol_metrics_proto_rawDescData
 }
 
-var file_pkg_protocol_metrics_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_pkg_protocol_metrics_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_pkg_protocol_metrics_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_pkg_protocol_metrics_proto_goTypes = []any{
-	(*Metric)(nil), // 0: metrics.Metric
-	nil,            // 1: metrics.Metric.LabelsEntry
+	(MetricType)(0),         // 0: protocol.MetricType
+	(*Metric)(nil),          // 1: protocol.Metric
+	(*MetricsRequest)(nil),  // 2: protocol.MetricsRequest
+	(*MetricsResponse)(nil), // 3: protocol.MetricsResponse
+	nil,                     // 4: protocol.Metric.LabelsEntry
 }
 var file_pkg_protocol_metrics_proto_depIdxs = []int32{
-	1, // 0: metrics.Metric.labels:type_name -> metrics.Metric.LabelsEntry
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	4, // 0: protocol.Metric.labels:type_name -> protocol.Metric.LabelsEntry
+	0, // 1: protocol.Metric.type:type_name -> protocol.MetricType
+	1, // 2: protocol.MetricsResponse.metrics:type_name -> protocol.Metric
+	2, // 3: protocol.MetricsService.StreamMetrics:input_type -> protocol.MetricsRequest
+	3, // 4: protocol.MetricsService.StreamMetrics:output_type -> protocol.MetricsResponse
+	4, // [4:5] is the sub-list for method output_type
+	3, // [3:4] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_metrics_proto_init() }
@@ -139,13 +317,14 @@ func file_pkg_protocol_metrics_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_metrics_proto_rawDesc), len(file_pkg_protocol_metrics_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   2,
+			NumEnums:      1,
+			NumMessages:   4,
 			NumExtensions: 0,
-			NumServices:   0,
+			NumServices:   1,
 		},
 		GoTypes:           file_pkg_protocol_metrics_proto_goTypes,
 		DependencyIndexes: file_pkg_protocol_metrics_proto_depIdxs,
+		EnumInfos:         file_pkg_protocol_metrics_proto_enumTypes,
 		MessageInfos:      file_pkg_protocol_metrics_proto_msgTypes,
 	}.Build()
 	File_pkg_protocol_metrics_proto = out.File
