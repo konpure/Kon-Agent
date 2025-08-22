@@ -70,9 +70,9 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 			}
 
 			out <- plugin.Event{
-				Name:   "cpu_usage_percent",
+				Name:   "network_packets_total",
 				Time:   time.Now().UnixNano(),
-				Labels: map[string]string{"mode": "user"},
+				Labels: map[string]string{"interface": t.getDefaultInterfaceName()},
 				Values: float64(count),
 			}
 		case <-ctx.Done():
