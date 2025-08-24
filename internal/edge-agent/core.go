@@ -15,29 +15,46 @@ import (
 )
 
 type Core struct {
-	cfg     *config.Config
-	plugins *plugin.Manager
-	client  *quic.Client
+	cfg             *config.Config
+	plugins         *plugin.Manager
+	client          *quic.Client
+	resourceManager *ResourceManager
+	StateManager    *StateManager
 }
 
 func New(cfg *config.Config) *Core {
 	pluginManager := plugin.NewManager(cfg)
 	client := quic.NewClient(cfg.Server)
 
+	// Init ResourceManager
+	resourceManager := NewResourceManager(10*time.Second, 80.0)
+
+	// Init StateManager
+	stateManager := NewStateManager(cfg.Cache.Path + string(os.PathSeparator) + "agent_state.json")
+
 	return &Core{
-		cfg:     cfg,
-		plugins: pluginManager,
-		client:  client,
+		cfg:             cfg,
+		plugins:         pluginManager,
+		client:          client,
+		resourceManager: resourceManager,
+		StateManager:    stateManager,
 	}
 }
 
 func (c *Core) Run() error {
 	slog.Info("Agent started", "config", c.cfg)
 
+	// Start StateManager&ResourceManager
+	c.StateManager.Start()
+	c.resourceManager.Start()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := c.client.Connect(ctx); err != nil {
 		slog.Error("Failed to connect to QUIC server", "error", err)
+		c.StateManager.RecordError("connection_failed")
+	} else {
+		c.StateManager.UpdateConnectionState(true)
 	}
 
 	// Setup signal handling for shutdown
@@ -67,10 +84,38 @@ func (c *Core) Run() error {
 
 				if err := c.sendMetricWithRetry(ctx, metric, 3); err != nil {
 					slog.Error("Failed to send metric after retries", "error", err)
+					c.StateManager.RecordError("send_failed")
+				} else {
+					c.StateManager.IncrementMetricSent()
 				}
 
 			case <-ctx.Done():
 				slog.Info("Event handler stopped")
+				return
+			}
+		}
+	}(ctx)
+
+	go func() {
+		for statusChange := range c.plugins.PluginStatusChanges() {
+			slog.Info("Plugin status changed", "plugin", statusChange.Name, "status", statusChange.Status, "time", statusChange.Time.Format(time.RFC3339))
+			c.StateManager.UpdatePluginStatus(statusChange.Name, string(statusChange.Status))
+		}
+	}()
+
+	go func(ctx context.Context) {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				for _, name := range c.plugins.GetPluginNames() {
+					status := c.plugins.GetPluginStatus(name)
+					c.StateManager.UpdatePluginStatus(name, string(status))
+				}
+			case <-ctx.Done():
+				return
 			}
 		}
 	}(ctx)
