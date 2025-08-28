@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"github.com/konpure/Kon-Agent/internal/config"
 	"github.com/konpure/Kon-Agent/internal/plugin"
+	"github.com/konpure/Kon-Agent/internal/transport/buffer"
 	"github.com/konpure/Kon-Agent/internal/transport/quic"
 	"github.com/konpure/Kon-Agent/pkg/protocol"
 	"log/slog"
+	"math"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,6 +23,7 @@ type Core struct {
 	client          *quic.Client
 	resourceManager *ResourceManager
 	StateManager    *StateManager
+	bufferManager   *buffer.Manager
 }
 
 func New(cfg *config.Config) *Core {
@@ -32,12 +36,14 @@ func New(cfg *config.Config) *Core {
 	// Init StateManager
 	stateManager := NewStateManager(cfg.Cache.Path + string(os.PathSeparator) + "agent_state.json")
 
+	bufferManager := buffer.NewManager()
 	return &Core{
 		cfg:             cfg,
 		plugins:         pluginManager,
 		client:          client,
 		resourceManager: resourceManager,
 		StateManager:    stateManager,
+		bufferManager:   bufferManager,
 	}
 }
 
@@ -64,6 +70,50 @@ func (c *Core) Run() error {
 	c.plugins.Start(ctx)
 
 	go func(ctx context.Context) {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				buf, err := c.bufferManager.GetOrCreateBuffer("default", 1024)
+				if err != nil {
+					slog.Error("Failed to get buffer", "error", err)
+					continue
+				}
+				metricsCount := buf.Len()
+				if metricsCount == 0 {
+					continue
+				}
+				slog.Info("Flushing metrics from buffer", "count", metricsCount)
+
+				batchSize := 100
+				metrics, err := c.bufferManager.GetBatch("default", batchSize)
+				if err != nil {
+					slog.Error("Failed to get metrics batch", "error", err)
+					continue
+				}
+				if len(metrics) == 0 {
+					slog.Debug("No metrics to send in batch")
+					continue
+				}
+
+				if err := c.sendMetricWithRetry(ctx, metrics, 3); err != nil {
+					slog.Error("Failed to send metrics batch", "error", err)
+					if putErr := c.bufferManager.PutBatch("default", metrics); putErr != nil {
+						slog.Error("Failed to re-insert failed metrics", "error", putErr)
+					}
+				} else {
+					slog.Info("Successfully sent metrics batch", "count", len(metrics))
+				}
+			case <-ctx.Done():
+				slog.Info("Shutting down metric flush goroutine")
+				return
+			}
+		}
+	}(ctx)
+
+	go func(ctx context.Context) {
 		for {
 			select {
 			case event, ok := <-c.plugins.Events():
@@ -82,11 +132,9 @@ func (c *Core) Run() error {
 					Labels:    event.Labels,
 				}
 
-				if err := c.sendMetricWithRetry(ctx, metric, 3); err != nil {
-					slog.Error("Failed to send metric after retries", "error", err)
-					c.StateManager.RecordError("send_failed")
-				} else {
-					c.StateManager.IncrementMetricSent()
+				if err := c.bufferManager.PutMetric("default", metric); err != nil {
+					slog.Error("Failed to put metric into buffer", "error", err)
+					c.StateManager.RecordError("buffer_put_failed")
 				}
 
 			case <-ctx.Done():
@@ -127,54 +175,55 @@ func (c *Core) Run() error {
 	<-sigChan
 	slog.Info("Shutting down agent...")
 
+	if err := c.client.Close(); err != nil {
+		slog.Error("Failed to close QUIC connection", "error", err)
+	}
+
 	c.plugins.Stop()
+	c.resourceManager.Stop()
+	c.StateManager.Stop()
 
 	slog.Info("Agent stopped")
 	return nil
 }
 
-func (c *Core) sendMetricWithRetry(ctx context.Context, metric *protocol.Metric, maxRetries int) error {
+func (c *Core) sendMetricWithRetry(ctx context.Context, metrics []*protocol.Metric, maxRetries int) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+
 	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			sleepDuration := time.Duration(math.Pow(2, float64(attempt))) * 100 * time.Millisecond
+			jitter := time.Duration(rand.Int63n(int64(sleepDuration)))
+			sleepDuration += jitter
 
-	for i := 0; i <= maxRetries; i++ {
-		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-
-		err := c.client.SendMetric(sendCtx, metric)
-		cancel()
-
-		if err == nil {
-			return nil
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled while retrying: %w", ctx.Err())
+			case <-time.After(sleepDuration):
+			}
 		}
 
-		lastErr = err
-		slog.Warn("Failed to send metric", "attempt", i+1, "err", err)
-
-		if i < maxRetries {
-			slog.Info("Attempting to reconnect to QUIC server")
-
-			reconnectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			if reconnectErr := c.client.Connect(reconnectCtx); reconnectErr != nil {
-				slog.Error("Failed to reconnect to QUIC server", "err", reconnectErr)
-				cancel()
-
-				// Wait before retrying
-				select {
-				case <-time.After(time.Duration(i+1) * time.Second):
-				case <-ctx.Done():
-					cancel()
-					return ctx.Err()
-				}
+		if !c.client.IsConnected() {
+			if err := c.client.Connect(ctx); err != nil {
+				lastErr = fmt.Errorf("Failed to connect to QUIC server: %w", err)
 				continue
 			}
-			cancel()
-
-			// Wait before retrying
-			select {
-			case <-time.After(time.Duration(i+1) * time.Second):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
 		}
+
+		req := &protocol.BatchMetricsRequest{
+			Metrics:   metrics,
+			AgentId:   c.cfg.ClientId,
+			Timestamp: time.Now().UnixNano(),
+		}
+
+		if err := c.client.SendBatchMetrics(ctx, req); err != nil {
+			lastErr = fmt.Errorf("Failed to send batch metric: %w", err)
+			continue
+		}
+		return nil
 	}
 	return fmt.Errorf("Failed to send metric after %d attempts: %w", maxRetries, lastErr)
 }

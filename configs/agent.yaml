@@ -1,4 +1,5 @@
 server: "quic://localhost:7843"
+client-id: "edge-agent-1"
 plugins:
   cpu:
     enable: true

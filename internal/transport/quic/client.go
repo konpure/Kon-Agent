@@ -52,16 +52,13 @@ func (c *Client) Connect(ctx context.Context) error {
 
 func (c *Client) SendMetric(ctx context.Context, metric *protocol.Metric) error {
 	c.mutex.Lock()
+	defer c.mutex.Unlock()
 
 	if c.conn == nil {
-		c.mutex.Unlock()
 		return fmt.Errorf("Not connected to QUIC server")
 	}
 
-	conn := c.conn
-	c.mutex.Unlock()
-
-	stream, err := conn.OpenUniStreamSync(ctx)
+	stream, err := c.conn.OpenUniStreamSync(ctx)
 	if err != nil {
 		if isConnectionClosed(err) {
 			c.mutex.Lock()
@@ -116,6 +113,45 @@ func (c *Client) SendMetric(ctx context.Context, metric *protocol.Metric) error 
 	}
 }
 
+func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.BatchMetricsRequest) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.conn == nil {
+		return fmt.Errorf("Not connected to QUIC server")
+	}
+
+	stream, err := c.conn.OpenUniStreamSync(ctx)
+	if err != nil {
+		if isConnectionClosed(err) {
+			c.conn = nil
+		}
+		return fmt.Errorf("Failed to open stream: %w", err)
+	}
+	defer stream.Close()
+
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("Failed to marshal batch metrics: %w", err)
+	}
+
+	length := uint32(len(data))
+	lengthBuf := make([]byte, 4)
+	lengthBuf[0] = byte(length >> 24)
+	lengthBuf[1] = byte(length >> 16)
+	lengthBuf[2] = byte(length >> 8)
+	lengthBuf[3] = byte(length)
+
+	if _, err := stream.Write(lengthBuf); err != nil {
+		return fmt.Errorf("Failed to write length: %w", err)
+	}
+
+	if _, err := stream.Write(data); err != nil {
+		return fmt.Errorf("Failed to write data: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) Close() error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -126,6 +162,12 @@ func (c *Client) Close() error {
 		return err
 	}
 	return nil
+}
+
+func (c *Client) IsConnected() bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.conn != nil && c.conn.Context().Err() == nil
 }
 
 func isConnectionClosed(err error) bool {

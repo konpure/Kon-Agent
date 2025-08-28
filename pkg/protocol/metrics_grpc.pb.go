@@ -19,14 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MetricsService_StreamMetrics_FullMethodName = "/protocol.MetricsService/StreamMetrics"
+	MetricsService_SendBatchMetrics_FullMethodName = "/protocol.MetricsService/SendBatchMetrics"
 )
 
 // MetricsServiceClient is the client API for MetricsService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type MetricsServiceClient interface {
-	StreamMetrics(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[MetricsRequest, MetricsResponse], error)
+	SendBatchMetrics(ctx context.Context, in *BatchMetricsRequest, opts ...grpc.CallOption) (*BatchMetricsResponse, error)
 }
 
 type metricsServiceClient struct {
@@ -37,24 +37,21 @@ func NewMetricsServiceClient(cc grpc.ClientConnInterface) MetricsServiceClient {
 	return &metricsServiceClient{cc}
 }
 
-func (c *metricsServiceClient) StreamMetrics(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[MetricsRequest, MetricsResponse], error) {
+func (c *metricsServiceClient) SendBatchMetrics(ctx context.Context, in *BatchMetricsRequest, opts ...grpc.CallOption) (*BatchMetricsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &MetricsService_ServiceDesc.Streams[0], MetricsService_StreamMetrics_FullMethodName, cOpts...)
+	out := new(BatchMetricsResponse)
+	err := c.cc.Invoke(ctx, MetricsService_SendBatchMetrics_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[MetricsRequest, MetricsResponse]{ClientStream: stream}
-	return x, nil
+	return out, nil
 }
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type MetricsService_StreamMetricsClient = grpc.BidiStreamingClient[MetricsRequest, MetricsResponse]
 
 // MetricsServiceServer is the server API for MetricsService service.
 // All implementations must embed UnimplementedMetricsServiceServer
 // for forward compatibility.
 type MetricsServiceServer interface {
-	StreamMetrics(grpc.BidiStreamingServer[MetricsRequest, MetricsResponse]) error
+	SendBatchMetrics(context.Context, *BatchMetricsRequest) (*BatchMetricsResponse, error)
 	mustEmbedUnimplementedMetricsServiceServer()
 }
 
@@ -65,8 +62,8 @@ type MetricsServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedMetricsServiceServer struct{}
 
-func (UnimplementedMetricsServiceServer) StreamMetrics(grpc.BidiStreamingServer[MetricsRequest, MetricsResponse]) error {
-	return status.Errorf(codes.Unimplemented, "method StreamMetrics not implemented")
+func (UnimplementedMetricsServiceServer) SendBatchMetrics(context.Context, *BatchMetricsRequest) (*BatchMetricsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SendBatchMetrics not implemented")
 }
 func (UnimplementedMetricsServiceServer) mustEmbedUnimplementedMetricsServiceServer() {}
 func (UnimplementedMetricsServiceServer) testEmbeddedByValue()                        {}
@@ -89,12 +86,23 @@ func RegisterMetricsServiceServer(s grpc.ServiceRegistrar, srv MetricsServiceSer
 	s.RegisterService(&MetricsService_ServiceDesc, srv)
 }
 
-func _MetricsService_StreamMetrics_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(MetricsServiceServer).StreamMetrics(&grpc.GenericServerStream[MetricsRequest, MetricsResponse]{ServerStream: stream})
+func _MetricsService_SendBatchMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MetricsServiceServer).SendBatchMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MetricsService_SendBatchMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MetricsServiceServer).SendBatchMetrics(ctx, req.(*BatchMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type MetricsService_StreamMetricsServer = grpc.BidiStreamingServer[MetricsRequest, MetricsResponse]
 
 // MetricsService_ServiceDesc is the grpc.ServiceDesc for MetricsService service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -102,14 +110,12 @@ type MetricsService_StreamMetricsServer = grpc.BidiStreamingServer[MetricsReques
 var MetricsService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "protocol.MetricsService",
 	HandlerType: (*MetricsServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
-	Streams: []grpc.StreamDesc{
+	Methods: []grpc.MethodDesc{
 		{
-			StreamName:    "StreamMetrics",
-			Handler:       _MetricsService_StreamMetrics_Handler,
-			ServerStreams: true,
-			ClientStreams: true,
+			MethodName: "SendBatchMetrics",
+			Handler:    _MetricsService_SendBatchMetrics_Handler,
 		},
 	},
+	Streams:  []grpc.StreamDesc{},
 	Metadata: "pkg/protocol/metrics.proto",
 }

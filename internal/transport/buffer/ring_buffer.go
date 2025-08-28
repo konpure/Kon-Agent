@@ -2,6 +2,7 @@ package buffer
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -60,4 +61,37 @@ func (r *RingBuffer) Len() int {
 
 func (r *RingBuffer) Capacity() int {
 	return r.size
+}
+
+func (r *RingBuffer) GetBatch(count int) ([]interface{}, error) {
+	if count <= 0 || count > r.Capacity() {
+		return nil, fmt.Errorf("invalid count: %d", count)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.size == 0 {
+		return nil, fmt.Errorf("buffer is empty")
+	}
+
+	actualCount := min(count, r.size)
+	result := make([]interface{}, 0, actualCount)
+
+	for i := 0; i < actualCount; i++ {
+		index := (r.head + i) % r.Capacity()
+		result = append(result, r.buffer[index])
+	}
+
+	r.head = (r.head + actualCount) % r.Capacity()
+	r.size -= actualCount
+
+	return result, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

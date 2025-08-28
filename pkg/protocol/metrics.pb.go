@@ -245,6 +245,134 @@ func (x *MetricsResponse) GetMetrics() []*Metric {
 	return nil
 }
 
+type BatchMetricsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Metrics       []*Metric              `protobuf:"bytes,1,rep,name=metrics,proto3" json:"metrics,omitempty"`
+	AgentId       string                 `protobuf:"bytes,2,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	Timestamp     int64                  `protobuf:"varint,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchMetricsRequest) Reset() {
+	*x = BatchMetricsRequest{}
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchMetricsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchMetricsRequest) ProtoMessage() {}
+
+func (x *BatchMetricsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchMetricsRequest.ProtoReflect.Descriptor instead.
+func (*BatchMetricsRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_metrics_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *BatchMetricsRequest) GetMetrics() []*Metric {
+	if x != nil {
+		return x.Metrics
+	}
+	return nil
+}
+
+func (x *BatchMetricsRequest) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
+	}
+	return ""
+}
+
+func (x *BatchMetricsRequest) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+type BatchMetricsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	AcceptedCount int32                  `protobuf:"varint,3,opt,name=accepted_count,json=acceptedCount,proto3" json:"accepted_count,omitempty"`
+	RejectedCount int32                  `protobuf:"varint,4,opt,name=rejected_count,json=rejectedCount,proto3" json:"rejected_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchMetricsResponse) Reset() {
+	*x = BatchMetricsResponse{}
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchMetricsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchMetricsResponse) ProtoMessage() {}
+
+func (x *BatchMetricsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchMetricsResponse.ProtoReflect.Descriptor instead.
+func (*BatchMetricsResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_metrics_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *BatchMetricsResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *BatchMetricsResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *BatchMetricsResponse) GetAcceptedCount() int32 {
+	if x != nil {
+		return x.AcceptedCount
+	}
+	return 0
+}
+
+func (x *BatchMetricsResponse) GetRejectedCount() int32 {
+	if x != nil {
+		return x.RejectedCount
+	}
+	return 0
+}
+
 var File_pkg_protocol_metrics_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_metrics_proto_rawDesc = "" +
@@ -263,15 +391,24 @@ const file_pkg_protocol_metrics_proto_rawDesc = "" +
 	"\x0eMetricsRequest\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\"=\n" +
 	"\x0fMetricsResponse\x12*\n" +
-	"\ametrics\x18\x01 \x03(\v2\x10.protocol.MetricR\ametrics*P\n" +
+	"\ametrics\x18\x01 \x03(\v2\x10.protocol.MetricR\ametrics\"z\n" +
+	"\x13BatchMetricsRequest\x12*\n" +
+	"\ametrics\x18\x01 \x03(\v2\x10.protocol.MetricR\ametrics\x12\x19\n" +
+	"\bagent_id\x18\x02 \x01(\tR\aagentId\x12\x1c\n" +
+	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp\"\x98\x01\n" +
+	"\x14BatchMetricsResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12%\n" +
+	"\x0eaccepted_count\x18\x03 \x01(\x05R\racceptedCount\x12%\n" +
+	"\x0erejected_count\x18\x04 \x01(\x05R\rrejectedCount*P\n" +
 	"\n" +
 	"MetricType\x12\r\n" +
 	"\tCPU_USAGE\x10\x00\x12\x10\n" +
 	"\fMEMORY_USAGE\x10\x01\x12\x13\n" +
 	"\x0fNETWORK_PACKETS\x10\x02\x12\f\n" +
-	"\bEBPF_RAW\x10\x032Z\n" +
-	"\x0eMetricsService\x12H\n" +
-	"\rStreamMetrics\x12\x18.protocol.MetricsRequest\x1a\x19.protocol.MetricsResponse(\x010\x01B+Z)github.com/konpure/Kon-Agent/pkg/protocolb\x06proto3"
+	"\bEBPF_RAW\x10\x032c\n" +
+	"\x0eMetricsService\x12Q\n" +
+	"\x10SendBatchMetrics\x12\x1d.protocol.BatchMetricsRequest\x1a\x1e.protocol.BatchMetricsResponseB+Z)github.com/konpure/Kon-Agent/pkg/protocolb\x06proto3"
 
 var (
 	file_pkg_protocol_metrics_proto_rawDescOnce sync.Once
@@ -286,25 +423,28 @@ func file_pkg_protocol_metrics_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_protocol_metrics_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_pkg_protocol_metrics_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_pkg_protocol_metrics_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_pkg_protocol_metrics_proto_goTypes = []any{
-	(MetricType)(0),         // 0: protocol.MetricType
-	(*Metric)(nil),          // 1: protocol.Metric
-	(*MetricsRequest)(nil),  // 2: protocol.MetricsRequest
-	(*MetricsResponse)(nil), // 3: protocol.MetricsResponse
-	nil,                     // 4: protocol.Metric.LabelsEntry
+	(MetricType)(0),              // 0: protocol.MetricType
+	(*Metric)(nil),               // 1: protocol.Metric
+	(*MetricsRequest)(nil),       // 2: protocol.MetricsRequest
+	(*MetricsResponse)(nil),      // 3: protocol.MetricsResponse
+	(*BatchMetricsRequest)(nil),  // 4: protocol.BatchMetricsRequest
+	(*BatchMetricsResponse)(nil), // 5: protocol.BatchMetricsResponse
+	nil,                          // 6: protocol.Metric.LabelsEntry
 }
 var file_pkg_protocol_metrics_proto_depIdxs = []int32{
-	4, // 0: protocol.Metric.labels:type_name -> protocol.Metric.LabelsEntry
+	6, // 0: protocol.Metric.labels:type_name -> protocol.Metric.LabelsEntry
 	0, // 1: protocol.Metric.type:type_name -> protocol.MetricType
 	1, // 2: protocol.MetricsResponse.metrics:type_name -> protocol.Metric
-	2, // 3: protocol.MetricsService.StreamMetrics:input_type -> protocol.MetricsRequest
-	3, // 4: protocol.MetricsService.StreamMetrics:output_type -> protocol.MetricsResponse
-	4, // [4:5] is the sub-list for method output_type
-	3, // [3:4] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	1, // 3: protocol.BatchMetricsRequest.metrics:type_name -> protocol.Metric
+	4, // 4: protocol.MetricsService.SendBatchMetrics:input_type -> protocol.BatchMetricsRequest
+	5, // 5: protocol.MetricsService.SendBatchMetrics:output_type -> protocol.BatchMetricsResponse
+	5, // [5:6] is the sub-list for method output_type
+	4, // [4:5] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_metrics_proto_init() }
@@ -318,7 +458,7 @@ func file_pkg_protocol_metrics_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_metrics_proto_rawDesc), len(file_pkg_protocol_metrics_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

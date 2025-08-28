@@ -40,6 +40,41 @@ func (m *Manager) GetOrCreateBuffer(name string, size int) (*RingBuffer, error) 
 	return newBuf, nil
 }
 
+func (m *Manager) GetBatch(bufferName string, maxCount int) ([]*protocol.Metric, error) {
+	buf, err := m.GetOrCreateBuffer(bufferName, 1024)
+	if err != nil {
+		return nil, err
+	}
+
+	items, err := buf.GetBatch(maxCount)
+	if err != nil {
+		return nil, err
+	}
+
+	metrics := make([]*protocol.Metric, 0, len(items))
+	for _, item := range items {
+		if metric, ok := item.(*protocol.Metric); ok {
+			metrics = append(metrics, metric)
+		}
+	}
+	return metrics, nil
+}
+
+func (m *Manager) PutBatch(bufferName string, metrics []*protocol.Metric) error {
+	buf, err := m.GetOrCreateBuffer(bufferName, 1024)
+	if err != nil {
+		return err
+	}
+
+	for _, metric := range metrics {
+		if err := buf.Put(metric); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (m *Manager) PutMetric(bufferName string, metric *protocol.Metric) error {
 	buf, err := m.GetOrCreateBuffer(bufferName, 1024)
 	if err != nil {

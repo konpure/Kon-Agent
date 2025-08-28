@@ -46,6 +46,10 @@ func (rm *ResourceManager) Start() {
 	}()
 }
 
+func (rm *ResourceManager) Stop() {
+	rm.cancel()
+}
+
 func (rm *ResourceManager) checkResource() error {
 	// TODO: Implement resource checking logic here
 	cpuUsage, err := cpu.Percent(0, false)

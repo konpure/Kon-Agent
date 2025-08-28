@@ -7,9 +7,10 @@ import (
 )
 
 type Config struct {
-	Server  string                         `yaml:"server"`
-	Plugins map[string]plugin.PluginConfig `yaml:"plugins"`
-	Cache   struct {
+	Server   string                         `yaml:"server"`
+	ClientId string                         `yaml:"client_id"`
+	Plugins  map[string]plugin.PluginConfig `yaml:"plugins"`
+	Cache    struct {
 		Path    string `yaml:"path"`
 		MaxSize string `yaml:"max_size"`
 	} `yaml:"cache"`
