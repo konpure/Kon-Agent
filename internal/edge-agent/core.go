@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/konpure/Kon-Agent/internal/config"
 	"github.com/konpure/Kon-Agent/internal/plugin"
+	"github.com/konpure/Kon-Agent/internal/security"
 	"github.com/konpure/Kon-Agent/internal/transport/buffer"
 	"github.com/konpure/Kon-Agent/internal/transport/quic"
 	"github.com/konpure/Kon-Agent/pkg/protocol"
@@ -68,6 +69,12 @@ func (c *Core) Run() error {
 	defer cancel()
 
 	c.plugins.Start(ctx)
+
+	if err := security.DropPrivileges(); err != nil {
+		slog.Warn("Failed to drop privileges, continuing with caution", "error", err)
+	} else {
+		slog.Info("Successfully dropped privileges to minimal set")
+	}
 
 	go func(ctx context.Context) {
 		ticker := time.NewTicker(5 * time.Second)
