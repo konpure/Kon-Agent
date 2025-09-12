@@ -70,6 +70,19 @@ func (c *Core) Run() error {
 
 	c.plugins.Start(ctx)
 
+	slog.Info("Waiting for eBPF plugin initialization")
+
+	initDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(initDeadline) {
+		ebpfStatus := c.plugins.GetPluginStatus("ebpf")
+
+		if ebpfStatus == plugin.StatusRunning || ebpfStatus == plugin.StatusError {
+			break
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+
 	if err := security.DropPrivileges(); err != nil {
 		slog.Warn("Failed to drop privileges, continuing with caution", "error", err)
 	} else {

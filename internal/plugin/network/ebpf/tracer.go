@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
 	"log/slog"
 	"net"
+	"os"
 	"time"
 )
 
@@ -94,6 +96,16 @@ func (t *Tracer) getDefaultInterfaceName() string {
 }
 
 func (t *Tracer) initCollector() error {
+	slog.Info("Removing memory lock limit")
+	if err := rlimit.RemoveMemlock(); err != nil {
+		slog.Error("Failed to remove memory lock limit", "err", err)
+	}
+
+	uid := os.Geteuid()
+	if uid != 0 {
+		slog.Warn("eBPF plugin is not running as root")
+	}
+
 	slog.Info("Loading eBPF program", "path", "internal/plugin/network/ebpf/output/network_monitor.o")
 	spec, err := ebpf.LoadCollectionSpec("internal/plugin/network/ebpf/output/network_monitor.o")
 	if err != nil {
