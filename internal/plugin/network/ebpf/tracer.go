@@ -7,6 +7,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
+	"golang.org/x/sys/unix"
 	"log/slog"
 	"net"
 	"os"
@@ -141,6 +142,7 @@ func (t *Tracer) initCollector() error {
 	xdpLink, err := link.AttachXDP(link.XDPOptions{
 		Program:   coll.Programs["track_packets"],
 		Interface: iface.Index,
+		Flags:     unix.XDP_FLAGS_SKB_MODE,
 	})
 	if err != nil {
 		coll.Close()
