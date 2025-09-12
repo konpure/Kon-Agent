@@ -4,6 +4,8 @@ import (
 	"flag"
 	"github.com/konpure/Kon-Agent/internal/config"
 	"github.com/konpure/Kon-Agent/internal/edge-agent"
+	_ "github.com/konpure/Kon-Agent/internal/plugin/network/ebpf"
+	_ "github.com/konpure/Kon-Agent/internal/plugin/system/cpu"
 	"log/slog"
 	"os"
 )

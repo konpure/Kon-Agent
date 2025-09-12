@@ -18,9 +18,9 @@ fi
 # 创建输出目录
 mkdir -p internal/plugin/network/ebpf/output
 
-# 编译 eBPF 程序
-echo "Compiling eBPF program..."
-clang -O2 -target bpf -c internal/plugin/network/ebpf/network_monitor.c \
+# 编译 eBPF 程序，添加 -g 选项生成包含 BTF 信息的调试符号
+echo "Compiling eBPF program with BTF support..."
+clang -g -O2 -target bpf -c internal/plugin/network/ebpf/network_monitor.c \
     -o internal/plugin/network/ebpf/output/network_monitor.o
 
 # 检查编译是否成功

@@ -38,15 +38,21 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	slog.Info("Connecting to QUIC server", "addr", c.serverAddr)
+	// Remove "quic://" prefix if present
+	serverAddr := c.serverAddr
+	if strings.HasPrefix(serverAddr, "quic://") {
+		serverAddr = strings.TrimPrefix(serverAddr, "quic://")
+	}
 
-	conn, err := quic.DialAddr(ctx, c.serverAddr, c.tlsConfig, c.quicConfig)
+	slog.Info("Connecting to QUIC server", "addr", serverAddr)
+
+	conn, err := quic.DialAddr(ctx, serverAddr, c.tlsConfig, c.quicConfig)
 	if err != nil {
 		return fmt.Errorf("Failed to dial QUIC server: %w", err)
 	}
 
 	c.conn = conn
-	slog.Info("Connected to QUIC server successfully", "addr", c.serverAddr)
+	slog.Info("Connected to QUIC server successfully", "addr", serverAddr)
 	return nil
 }
 
