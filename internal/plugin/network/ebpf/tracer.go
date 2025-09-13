@@ -15,9 +15,10 @@ import (
 )
 
 type Tracer struct {
-	config    plugin.PluginConfig
-	stop      chan struct{}
-	collector *collector
+	config        plugin.PluginConfig
+	stop          chan struct{}
+	collector     *collector
+	interfaceName string
 }
 
 type collector struct {
@@ -66,11 +67,13 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 	for {
 		select {
 		case <-ticker.C:
+			slog.Info("Reading packet count")
 			count, err := t.readPacketCount()
 			if err != nil {
 				slog.Error("Failed to read packet count", "err", err)
 				continue
 			}
+			slog.Info("Successfully read packet count", "count", count)
 
 			out <- plugin.Event{
 				Name:   "network_packets_total",
@@ -78,6 +81,7 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 				Labels: map[string]string{"interface": t.getDefaultInterfaceName()},
 				Values: float64(count),
 			}
+			slog.Info("Successfully sent packet count event")
 		case <-ctx.Done():
 			slog.Info("eBPF plugin stopped")
 			return nil
@@ -89,10 +93,16 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 }
 
 func (t *Tracer) getDefaultInterfaceName() string {
+	if t.interfaceName != "" {
+		return t.interfaceName
+	}
+
 	iface, err := getDefaultInterface()
 	if err != nil {
+		slog.Error("Failed to get default interface", "err", err)
 		return "unknown"
 	}
+	t.interfaceName = iface
 	return iface
 }
 
@@ -126,6 +136,7 @@ func (t *Tracer) initCollector() error {
 	}
 
 	interfaceName, err := getDefaultInterface()
+	t.interfaceName = interfaceName
 	if err != nil {
 		coll.Close()
 		return fmt.Errorf("failed to get default interface: %w", err)
