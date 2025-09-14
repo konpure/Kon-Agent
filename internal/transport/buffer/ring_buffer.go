@@ -75,16 +75,16 @@ func (r *RingBuffer) GetBatch(count int) ([]interface{}, error) {
 		return nil, fmt.Errorf("buffer is empty")
 	}
 
-	actualCount := min(count, r.size)
+	actualCount := min(count, r.count)
 	result := make([]interface{}, 0, actualCount)
 
 	for i := 0; i < actualCount; i++ {
-		index := (r.head + i) % r.Capacity()
+		index := (r.tail + i) % r.Capacity()
 		result = append(result, r.buffer[index])
 	}
 
-	r.head = (r.head + actualCount) % r.Capacity()
-	r.size -= actualCount
+	r.tail = (r.tail + actualCount) % r.Capacity()
+	r.count -= actualCount
 
 	return result, nil
 }
