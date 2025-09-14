@@ -19,9 +19,18 @@ type Client struct {
 	quicConfig *quic.Config
 	conn       *quic.Conn
 	mutex      sync.Mutex
+
+	// Connection Pool
+	streamPool      chan *quic.SendStream
+	maxPoolSize     int
+	streamTimeout   time.Duration
+	poolInitialized bool
 }
 
 func NewClient(serverAddr string) *Client {
+	maxPoolSize := 10
+	streamTimeout := 10 * time.Second
+
 	return &Client{
 		serverAddr: serverAddr,
 		tlsConfig: &tls.Config{
@@ -31,7 +40,86 @@ func NewClient(serverAddr string) *Client {
 		quicConfig: &quic.Config{
 			KeepAlivePeriod: 10 * time.Second,
 		},
+		maxPoolSize:   maxPoolSize,
+		streamTimeout: streamTimeout,
+		streamPool:    make(chan *quic.SendStream, maxPoolSize),
 	}
+}
+
+func (c *Client) initStreamPool() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.poolInitialized || c.conn == nil {
+		return
+	}
+
+	c.poolInitialized = true
+
+	go func() {
+		ticker := time.NewTicker(c.streamTimeout / 2)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// TODO: Check if stream is still active
+				c.mutex.Lock()
+				conn := c.conn
+				c.mutex.Unlock()
+
+				if conn == nil {
+					break
+				}
+
+				tempPool := make([]*quic.SendStream, 0)
+				poolSize := len(c.streamPool)
+
+				// Check if stream is still active
+				for i := 0; i < poolSize; i++ {
+					stream := <-c.streamPool
+					if stream != nil && stream.Context().Err() == nil {
+						tempPool = append(tempPool, stream)
+					} else if stream != nil {
+						stream.Close()
+					}
+				}
+
+				for _, stream := range tempPool {
+					select {
+					case c.streamPool <- stream:
+						// stream has been returned to pool
+					default:
+						// stream is not returned to pool, close it
+						stream.Close()
+					}
+				}
+			}
+		}
+	}()
+}
+
+func (c *Client) getStream(ctx context.Context) (*quic.SendStream, error) {
+	select {
+	case stream := <-c.streamPool:
+		if stream.Context().Err() == nil {
+			return stream, nil
+		}
+		return c.createNewStream(ctx)
+	default:
+		return c.createNewStream(ctx)
+	}
+}
+
+func (c *Client) createNewStream(ctx context.Context) (*quic.SendStream, error) {
+	c.mutex.Lock()
+	conn := c.conn
+	c.mutex.Unlock()
+
+	if conn == nil {
+		return nil, fmt.Errorf("Not connected to QUIC server")
+	}
+	return conn.OpenUniStreamSync(ctx)
 }
 
 func (c *Client) Connect(ctx context.Context) error {
@@ -53,18 +141,23 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.conn = conn
 	slog.Info("Connected to QUIC server successfully", "addr", serverAddr)
+
+	// Initialize stream pool
+	go c.initStreamPool()
+
 	return nil
 }
 
 func (c *Client) SendMetric(ctx context.Context, metric *protocol.Metric) error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	conn := c.conn
+	c.mutex.Unlock()
 
-	if c.conn == nil {
+	if conn == nil {
 		return fmt.Errorf("Not connected to QUIC server")
 	}
 
-	stream, err := c.conn.OpenUniStreamSync(ctx)
+	stream, err := c.getStream(ctx)
 	if err != nil {
 		if isConnectionClosed(err) {
 			c.mutex.Lock()
@@ -74,7 +167,19 @@ func (c *Client) SendMetric(ctx context.Context, metric *protocol.Metric) error 
 		return fmt.Errorf("Failed to open stream: %w", err)
 	}
 
-	defer stream.Close()
+	defer func() {
+		if stream.Context().Err() == nil {
+			select {
+			case c.streamPool <- stream:
+				// stream has been returned to pool
+			default:
+				// stream is not returned to pool, close it
+				stream.Close()
+			}
+		} else {
+			stream.Close()
+		}
+	}()
 
 	data, err := proto.Marshal(metric)
 	if err != nil {
@@ -121,20 +226,36 @@ func (c *Client) SendMetric(ctx context.Context, metric *protocol.Metric) error 
 
 func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.BatchMetricsRequest) error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	conn := c.conn
+	c.mutex.Unlock()
 
-	if c.conn == nil {
+	if conn == nil {
 		return fmt.Errorf("Not connected to QUIC server")
 	}
 
-	stream, err := c.conn.OpenUniStreamSync(ctx)
+	stream, err := c.getStream(ctx)
 	if err != nil {
 		if isConnectionClosed(err) {
+			c.mutex.Lock()
 			c.conn = nil
+			c.mutex.Unlock()
 		}
 		return fmt.Errorf("Failed to open stream: %w", err)
 	}
-	defer stream.Close()
+
+	defer func() {
+		if stream.Context().Err() == nil {
+			select {
+			case c.streamPool <- stream:
+				// stream has been returned to pool
+			default:
+				// stream is not returned to pool, close it
+				stream.Close()
+			}
+		} else {
+			stream.Context()
+		}
+	}()
 
 	data, err := proto.Marshal(req)
 	if err != nil {
