@@ -182,19 +182,33 @@ func (t *Tracer) closeCollector() {
 }
 
 func (t *Tracer) readPacketCount() (uint64, error) {
-	if t.collector == nil {
-		return 0, fmt.Errorf("collector not initialized")
-	}
+	var result uint64
+	var resultErr error
 
-	var key uint32 = 0
-	var value uint64
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Recovered from panic", "err", r)
+				resultErr = fmt.Errorf("recovered from panic: %v", r)
+			}
+		}()
+		if t.collector == nil {
+			resultErr = fmt.Errorf("collector not initialized")
+			return
+		}
 
-	// 从map中读取数据
-	if err := t.collector.pktCount.Lookup(&key, &value); err != nil {
-		return 0, err
-	}
+		var key uint32 = 0
+		var value uint64
 
-	return value, nil
+		if err := t.collector.pktCount.Lookup(&key, &value); err != nil {
+			resultErr = fmt.Errorf("failed to lookup packet count: %w", err)
+			return
+		}
+
+		result = value
+	}()
+
+	return result, resultErr
 }
 
 // Get default interface name

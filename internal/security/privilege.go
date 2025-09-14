@@ -39,12 +39,12 @@ func DropPrivileges() error {
 	}
 
 	// Switch to nobody user
-	if err := syscall.Setuid(65534); err != nil {
-		return fmt.Errorf("failed to set uid to nobody: %v", err)
-	}
-	if err := syscall.Setgid(65534); err != nil {
-		return fmt.Errorf("failed to set gid to nobody: %v", err)
-	}
+	// if err := syscall.Setuid(65534); err != nil {
+	// 	 return fmt.Errorf("failed to set uid to nobody: %v", err)
+	// }
+	// if err := syscall.Setgid(65534); err != nil {
+	// 	 return fmt.Errorf("failed to set gid to nobody: %v", err)
+	// }
 
 	if err := syscall.Setpgid(0, 0); err != nil {
 		return fmt.Errorf("failed to set pgid: %v", err)
