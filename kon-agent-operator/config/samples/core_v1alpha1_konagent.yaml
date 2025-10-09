@@ -1,0 +1,12 @@
+apiVersion: core.konpure.com/v1alpha1
+kind: KonAgent
+metadata:
+  labels:
+    app.kubernetes.io/name: konagent
+    app.kubernetes.io/instance: konagent-sample
+    app.kubernetes.io/part-of: kon-agent-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: kon-agent-operator
+  name: konagent-sample
+spec:
+  # TODO(user): Add fields here

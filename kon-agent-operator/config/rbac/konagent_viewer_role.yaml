@@ -1,0 +1,27 @@
+# permissions for end users to view konagents.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: konagent-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: kon-agent-operator
+    app.kubernetes.io/part-of: kon-agent-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: konagent-viewer-role
+rules:
+- apiGroups:
+  - core.konpure.com
+  resources:
+  - konagents
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.konpure.com
+  resources:
+  - konagents/status
+  verbs:
+  - get

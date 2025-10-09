@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - core.konpure.com
+  resources:
+  - konagents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.konpure.com
+  resources:
+  - konagents/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - core.konpure.com
+  resources:
+  - konagents/status
+  verbs:
+  - get
+  - patch
+  - update
