@@ -41,7 +41,7 @@ type KonAgentSpec struct {
 	Plugins map[string]PluginConfig `json:"plugins"`
 
 	// Cache configuration
-	Cache CacheConfig `json:"cache,omitempty"`
+	Cache *CacheConfig `json:"cache,omitempty"`
 }
 
 // PluginConfig defines the configuration for a specific plugin

@@ -10,3 +10,15 @@ metadata:
   name: konagent-sample
 spec:
   # TODO(user): Add fields here
+  clientId: "edge-agent-1"
+  replicas: 1
+  plugins:
+    cpu:
+      enable: true
+      period: 5s
+    ebpf:
+      enable: true
+      period: 5s
+  cache:
+    path: /tmp/edge_agent.cache
+    maxSize: 50MB
