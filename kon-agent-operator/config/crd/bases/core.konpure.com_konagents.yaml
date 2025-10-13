@@ -164,6 +164,11 @@ spec:
                 description: LastHeartbeatTime is the last time the agent sent a heartbeat
                 format: date-time
                 type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  for this resource by the controller.
+                format: int64
+                type: integer
             type: object
         type: object
     served: true

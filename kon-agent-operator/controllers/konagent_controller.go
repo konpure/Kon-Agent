@@ -139,6 +139,8 @@ func (r *KonAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			Message: "Deployment is ready",
 			Reason:  "DeploymentReady"})
 
+		// Update the observed generation to indicate that we've processed this spec version
+		konAgent.Status.ObservedGeneration = konAgent.Generation
 	} else {
 		r.updateStatus(ctx, &konAgent, metav1.Condition{
 			Type:    "DeploymentReady",
