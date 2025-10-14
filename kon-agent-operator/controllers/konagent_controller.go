@@ -431,6 +431,8 @@ func (r *KonAgentReconciler) generateConfigContent(konAgent *corev1alpha1.KonAge
 func (r *KonAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.KonAgent{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.ConfigMap{}).
 		Complete(r)
 }
 
