@@ -436,12 +436,31 @@ func (r *KonAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *KonAgentReconciler) updateStatus(ctx context.Context, konAgent *corev1alpha1.KonAgent, condition metav1.Condition) {
+func (r *KonAgentReconciler) updateStatus(ctx context.Context, konAgent *corev1alpha1.KonAgent, condition metav1.Condition) error {
 	// Update the status with the given condition
-	// This is a simplified implementation
+	log := log.FromContext(ctx)
 	condition.LastTransitionTime = metav1.Now()
-	konAgent.Status.Conditions = append(konAgent.Status.Conditions, condition)
-	r.Status().Update(ctx, konAgent)
+
+	found := false
+	for i, c := range konAgent.Status.Conditions {
+		if c.Type == condition.Type {
+			if c.Status != condition.Status || c.Reason != condition.Reason {
+				konAgent.Status.Conditions[i] = condition
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		konAgent.Status.Conditions = append(konAgent.Status.Conditions, condition)
+	}
+
+	if err := r.Status().Update(ctx, konAgent); err != nil {
+		log.Error(err, "Failed to update KonAgent status")
+		return err
+	}
+	return nil
 }
 
 const controllerFinalizer = "core.konpure.com/finalizer"
