@@ -504,5 +504,43 @@ func (r *KonAgentReconciler) finalizeKonAgent(ctx context.Context, konAgent *cor
 	// For example, you might want to delete any additional resources created
 	// outside of the owner references
 
+	// try to delete ConfigMap
+	configMapName := fmt.Sprintf("%s-config", konAgent.Name)
+	configMap := &corev1.ConfigMap{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      configMapName,
+		Namespace: konAgent.Namespace,
+	}, configMap)
+	if err == nil {
+		// ConfigMap exists
+		log.Info("Deleting configMap during finalization", "name", configMap.Name, "namespace", configMap.Namespace)
+		if deleteerr := r.Delete(ctx, configMap); deleteerr != nil {
+			log.Error(deleteerr, "Failed to delete ConfigMap", "name", configMap.Name, "namespace", configMap.Namespace)
+			return deleteerr
+		}
+	} else if !errors.IsNotFound(err) {
+		log.Error(err, "Error checking ConfigMap existence", "name", configMapName, "namespace", konAgent.Namespace)
+		return err
+	}
+
+	deploymentName := fmt.Sprintf("%s-deployment", konAgent.Name)
+	deployment := &appsv1.Deployment{}
+	err = r.Get(ctx, types.NamespacedName{
+		Name:      deploymentName,
+		Namespace: konAgent.Namespace,
+	}, deployment)
+
+	if err == nil {
+		// Deployment exists
+		log.Info("Deleting deployment during finalization", "name", deployment.Name, "namespace", deployment.Namespace)
+		if deleteerr := r.Delete(ctx, deployment); deleteerr != nil {
+			log.Error(deleteerr, "Failed to delete Deployment", "name", deployment.Name, "namespace", deployment.Namespace)
+			return deleteerr
+		}
+	} else if !errors.IsNotFound(err) {
+		log.Error(err, "Error checking Deployment existence", "name", deploymentName, "namespace", konAgent.Namespace)
+		return err
+	}
+
 	return nil
 }
