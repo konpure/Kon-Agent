@@ -77,6 +77,7 @@ func (c *Core) Run() error {
 		ebpfStatus := c.plugins.GetPluginStatus("ebpf")
 
 		if ebpfStatus == plugin.StatusRunning || ebpfStatus == plugin.StatusError {
+			slog.Info("eBPF plugin status", "status", ebpfStatus)
 			break
 		}
 

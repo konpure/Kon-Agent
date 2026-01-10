@@ -360,7 +360,7 @@ func (r *KonAgentReconciler) ensureConfigMap(ctx context.Context, konAgent *core
 
 	if err != nil {
 		if errors.IsNotFound(err) {
-			// Create new ComfigMap
+			// Create new ConfigMap
 			configMap := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      configMapName,
