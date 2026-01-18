@@ -4,6 +4,9 @@ plugins:
   cpu:
     enable: true
     period: 5s
+  memory:
+    enable: true
+    period: 5s
   ebpf:
     enable: true
     period: 5s

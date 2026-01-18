@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -54,8 +55,10 @@ func (c *Collector) Run(ctx context.Context, out chan<- plugin.Event) error {
 				Values: v,
 			}
 		case <-ctx.Done():
+			slog.Info("CPU collector stopped by context")
 			return nil
 		case <-c.stop:
+			slog.Info("CPU collector stopped by Stop()")
 			return nil
 		}
 	}
