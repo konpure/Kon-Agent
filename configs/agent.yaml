@@ -7,6 +7,9 @@ plugins:
   memory:
     enable: true
     period: 5s
+  disk:
+    enable: true
+    period: 5s
   ebpf:
     enable: true
     period: 5s
