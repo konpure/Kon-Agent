@@ -1,0 +1,73 @@
+# Lefthook Git hooks 配置
+# 安装: lefthook install
+# 手动验证: lefthook run pre-commit / pre-push
+min_version: 1.7.0
+
+pre-commit:
+  parallel: true
+  commands:
+    # Go 格式化：自动修复并重新暂存
+    gofmt:
+      glob: "*.go"
+      run: gofmt -s -w {staged_files}
+      stage_fixed: true
+
+    # 根模块 lint（golangci-lint 已内含 govet，无需单独跑 go vet）
+    # --new-from-rev 只拦截本分支新引入的问题，不清理存量告警
+    # 注：ebpf 包是 cgo 包，SEC() 宏只有 clang 能编译，需与 README 构建方式一致
+    golangci-lint-root:
+      glob: "*.go"
+      exclude: "kon-agent-operator/"
+      run: CC=clang golangci-lint run --new-from-rev=origin/main ./...
+
+    # Operator 模块 lint
+    golangci-lint-operator:
+      root: "kon-agent-operator/"
+      glob: "*.go"
+      run: golangci-lint run --config ../.golangci.yml --new-from-rev=origin/main ./...
+
+    # 依赖整洁性：go.mod/go.sum 变更时自动 tidy
+    go-mod-tidy-root:
+      glob: "go.{mod,sum}"
+      run: go mod tidy
+      stage_fixed: true
+    go-mod-tidy-operator:
+      root: "kon-agent-operator/"
+      glob: "go.{mod,sum}"
+      run: go mod tidy
+      stage_fixed: true
+
+    # Shell 脚本检查
+    shellcheck:
+      glob: "*.sh"
+      run: shellcheck {staged_files}
+
+    # eBPF C 代码格式化
+    clang-format:
+      glob: "*.{c,h}"
+      run: clang-format -i {staged_files}
+      stage_fixed: true
+
+pre-push:
+  parallel: true
+  commands:
+    # 编译门禁（eBPF .o 为运行时加载，不依赖其构建产物）
+    # ebpf 包含 cgo，SEC() 宏需要 clang，与 README 构建方式一致
+    build-root:
+      run: CC=clang go build ./...
+    build-operator:
+      root: "kon-agent-operator/"
+      run: go build ./...
+
+commit-msg:
+  commands:
+    # Conventional Commits 校验: <type>(<scope>): <description>
+    conventional-commit:
+      run: |
+        PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .{1,}'
+        if ! grep -Eq "$PATTERN" {1}; then
+          echo "[commit-msg] Commit message 需遵循 Conventional Commits 规范"
+          echo "[commit-msg] 格式: <type>(<scope>): <description>"
+          echo "[commit-msg] 示例: feat(plugin): add memory monitor plugin"
+          exit 1
+        fi

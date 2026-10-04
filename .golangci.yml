@@ -1,0 +1,18 @@
+# golangci-lint v2 配置
+# 仓库根模块与 kon-agent-operator 模块共用（operator 通过 --config ../.golangci.yml 引用）
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - misspell  # 拼写检查
+    - unconvert # 冗余类型转换
+
+issues:
+  # 展示全部告警，不折叠同类问题
+  max-issues-per-linter: 0
+  max-same-issues: 0
