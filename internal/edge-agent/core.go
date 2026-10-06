@@ -7,9 +7,11 @@ import (
 	"github.com/konpure/Kon-Agent/internal/plugin"
 	"github.com/konpure/Kon-Agent/internal/security"
 	"github.com/konpure/Kon-Agent/internal/transport/quic"
+	"github.com/konpure/Kon-Agent/internal/wal"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -83,19 +85,51 @@ func (c *Core) Run() error {
 		slog.Info("Successfully dropped privileges to minimal set")
 	}
 
-	// Build the explicit pipeline: receiver -> [batch] -> [sampling] -> exporter.
+	// Open the write-ahead log when enabled; on failure the pipeline falls
+	// back to direct export (in-memory requeue).
+	var walInstance *wal.WAL
+	if c.cfg.WAL.Enable {
+		walCfg := wal.Config{
+			Dir:           c.cfg.WAL.Dir,
+			FsyncInterval: c.cfg.WAL.FsyncInterval,
+		}
+		if walCfg.Dir == "" {
+			walCfg.Dir = filepath.Join(c.cfg.Cache.Path, "wal")
+		}
+		if size, err := wal.ParseSize(c.cfg.WAL.SegmentSize); err == nil && size > 0 {
+			walCfg.SegmentSize = size
+		}
+		if size, err := wal.ParseSize(c.cfg.WAL.MaxSize); err == nil && size > 0 {
+			walCfg.MaxSize = size
+		}
+
+		w, err := wal.Open(walCfg)
+		if err != nil {
+			slog.Error("Failed to open WAL, falling back to direct export", "error", err)
+			c.StateManager.RecordError("wal_open_failed")
+		} else {
+			walInstance = w
+			slog.Info("WAL opened", "dir", walCfg.Dir, "segment_size", walCfg.SegmentSize, "max_size", walCfg.MaxSize)
+		}
+	}
+
+	// Build the explicit pipeline: receiver -> [batch] -> [sampling] -> [WAL] -> exporter.
 	pipe := pipeline.New(pipeline.Config{
 		AgentID:       c.cfg.ClientId,
 		MaxBatchSize:  100,
 		MaxPending:    1024,
 		FlushInterval: 5 * time.Second,
 		MaxRetries:    3,
+		WAL:           walInstance,
 		OnExported: func(count int) {
 			c.StateManager.IncrementMetricSent()
-			slog.Info("Successfully sent metrics batch", "data_points", count)
+			slog.Info("Successfully persisted metrics batch", "data_points", count)
 		},
 		OnError: func(errorType string) {
 			c.StateManager.RecordError(errorType)
+		},
+		OnBackpressure: func(degraded bool) {
+			slog.Warn("WAL backpressure changed", "degraded", degraded)
 		},
 	}, c.plugins.Events(), c.client)
 
@@ -142,7 +176,14 @@ func (c *Core) Run() error {
 		slog.Error("Pipeline shutdown did not complete", "error", err)
 	}
 
-	// 3) Close the transport only after the pipeline is drained.
+	// 3) Fsync and close the WAL before closing the transport.
+	if walInstance != nil {
+		if err := walInstance.Close(); err != nil {
+			slog.Error("Failed to close WAL", "error", err)
+		}
+	}
+
+	// 4) Close the transport only after the pipeline is drained.
 	if err := c.client.Close(); err != nil {
 		slog.Error("Failed to close QUIC connection", "error", err)
 	}
