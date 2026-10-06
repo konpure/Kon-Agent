@@ -6,9 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/konpure/Kon-Agent/internal/transport/buffer"
 	"github.com/konpure/Kon-Agent/internal/transport/quic"
+	"github.com/konpure/Kon-Agent/internal/wal"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
+	"google.golang.org/protobuf/proto"
 )
 
 // Config holds the pipeline parameters.
@@ -23,22 +24,27 @@ type Config struct {
 	// MaxRetries bounds exporter retries per batch.
 	MaxRetries int
 
+	// WAL, when set, makes the pipeline write-through: every batch is
+	// persisted before sending, and a consumer goroutine replays the log.
+	// When nil, the pipeline falls back to direct export + in-memory requeue.
+	WAL *wal.WAL
+
 	// Observability hooks, wired to the agent's StateManager.
-	OnExported func(count int)
-	OnError    func(errorType string)
+	OnExported     func(count int)
+	OnError        func(errorType string)
+	OnBackpressure func(degraded bool)
 }
 
 // Pipeline is the explicit data path of the agent:
 //
-//	plugin(receiver) -> [batch] -> [sampling] -> exporter -> QUIC
-//
-// WAL will be inserted between the processors and the exporter.
+//	plugin(receiver) -> [batch] -> [sampling] -> [WAL] -> exporter -> QUIC
 type Pipeline struct {
 	cfg        Config
 	receiver   *Receiver
 	batcher    *BatchProcessor
 	processors []Processor
 	exporter   *Exporter
+	consumer   *walConsumer // nil when WAL is disabled
 
 	stop chan struct{}
 	done chan struct{}
@@ -55,7 +61,8 @@ func New(cfg Config, events <-chan plugin.Event, client *quic.Client) *Pipeline 
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = 5 * time.Second
 	}
-	return &Pipeline{
+
+	p := &Pipeline{
 		cfg:        cfg,
 		receiver:   NewReceiver(events),
 		batcher:    NewBatchProcessor(cfg.MaxBatchSize, cfg.MaxPending),
@@ -64,6 +71,18 @@ func New(cfg Config, events <-chan plugin.Event, client *quic.Client) *Pipeline 
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
 	}
+
+	if cfg.WAL != nil {
+		consumer, err := newWALConsumer(cfg.WAL, p.exporter, cfg.OnError, cfg.OnBackpressure)
+		if err != nil {
+			// Degrade to direct export rather than failing the whole agent.
+			slog.Error("Failed to init WAL consumer, falling back to direct export", "error", err)
+			p.onError("wal_consumer_init_failed")
+		} else {
+			p.consumer = consumer
+		}
+	}
+	return p
 }
 
 // AddProcessor appends a stage after the batch processor.
@@ -76,6 +95,10 @@ func (p *Pipeline) AddProcessor(proc Processor) {
 func (p *Pipeline) Run(ctx context.Context) {
 	defer close(p.done)
 
+	if p.consumer != nil {
+		go p.consumer.run(ctx)
+	}
+
 	ticker := time.NewTicker(p.cfg.FlushInterval)
 	defer ticker.Stop()
 
@@ -87,7 +110,7 @@ func (p *Pipeline) Run(ctx context.Context) {
 				p.emit(ctx, p.batcher.Take())
 				return
 			}
-			out, err := p.batcher.Process(ctx, []*buffer.Item{p.receiver.Convert(ev)})
+			out, err := p.batcher.Process(ctx, []*Item{p.receiver.Convert(ev)})
 			if err != nil {
 				p.onError("batch_failed")
 				continue
@@ -108,8 +131,9 @@ func (p *Pipeline) Run(ctx context.Context) {
 	}
 }
 
-// emit runs the remaining processors and exports the batch.
-func (p *Pipeline) emit(ctx context.Context, batch []*buffer.Item) {
+// emit runs the processors, then either persists the batch into the WAL
+// (write-through) or exports it directly (fallback).
+func (p *Pipeline) emit(ctx context.Context, batch []*Item) {
 	if len(batch) == 0 {
 		return
 	}
@@ -130,26 +154,49 @@ func (p *Pipeline) emit(ctx context.Context, batch []*buffer.Item) {
 	}
 
 	req := AssembleExportRequest(p.cfg.AgentID, out)
-	if err := p.exporter.Export(ctx, req); err != nil {
-		slog.Error("Failed to export batch", "error", err)
-		p.onError("export_failed")
-		// No WAL yet: hand the batch back for a later attempt.
-		p.batcher.Requeue(batch)
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		slog.Error("Failed to marshal export request", "error", err)
+		p.onError("marshal_failed")
 		return
 	}
 
+	if p.consumer != nil {
+		if err := p.cfg.WAL.Append(0, payload); err != nil {
+			slog.Error("Failed to append batch to WAL", "error", err)
+			p.onError("wal_append_failed")
+			p.batcher.Requeue(batch)
+			return
+		}
+		p.consumer.notify()
+		// Durable now; the consumer delivers it. Count as accepted.
+		p.onExported(len(out))
+		return
+	}
+
+	// Fallback without WAL: direct export, requeue on failure.
+	if err := p.exporter.ExportBytes(ctx, payload); err != nil {
+		slog.Error("Failed to export batch", "error", err)
+		p.onError("export_failed")
+		p.batcher.Requeue(batch)
+		return
+	}
 	p.onExported(len(out))
 }
 
-// Shutdown stops the driver after flushing the pending batch.
+// Shutdown stops the driver after flushing the pending batch, then drains
+// and stops the WAL consumer.
 func (p *Pipeline) Shutdown(ctx context.Context) error {
 	p.once.Do(func() { close(p.stop) })
 	select {
 	case <-p.done:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	if p.consumer != nil {
+		p.consumer.stop()
+	}
+	return nil
 }
 
 func (p *Pipeline) onExported(count int) {

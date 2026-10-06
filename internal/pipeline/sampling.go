@@ -1,10 +1,6 @@
 package pipeline
 
-import (
-	"context"
-
-	"github.com/konpure/Kon-Agent/internal/transport/buffer"
-)
+import "context"
 
 // SamplingProcessor is a pass-through placeholder kept in the pipeline so the
 // stage structure is final. It will be replaced by the BTrDB-style downsampling
@@ -20,6 +16,6 @@ func (s *SamplingProcessor) Name() string {
 	return "sampling"
 }
 
-func (s *SamplingProcessor) Process(_ context.Context, batch []*buffer.Item) ([]*buffer.Item, error) {
+func (s *SamplingProcessor) Process(_ context.Context, batch []*Item) ([]*Item, error) {
 	return batch, nil
 }

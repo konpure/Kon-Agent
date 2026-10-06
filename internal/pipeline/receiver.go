@@ -3,7 +3,6 @@ package pipeline
 import (
 	"log/slog"
 
-	"github.com/konpure/Kon-Agent/internal/transport/buffer"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
 	"github.com/konpure/Kon-Agent/pkg/protocol"
 )
@@ -47,13 +46,13 @@ func (r *Receiver) Events() <-chan plugin.Event {
 }
 
 // Convert turns a plugin Event into a buffered item carrying its scope.
-func (r *Receiver) Convert(e plugin.Event) *buffer.Item {
+func (r *Receiver) Convert(e plugin.Event) *Item {
 	slog.Debug("Received event",
 		"event", e.Name,
 		"value", e.Values,
 		"labels", e.Labels)
 
-	return &buffer.Item{
+	return &Item{
 		Scope:  e.Scope,
 		Metric: EventToMetric(e),
 	}

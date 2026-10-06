@@ -8,15 +8,15 @@ import (
 	"time"
 
 	"github.com/konpure/Kon-Agent/internal/transport/quic"
-	"github.com/konpure/Kon-Agent/pkg/protocol"
 )
 
-// Exporter is the pipeline's sink stage: it ships batches over QUIC with
-// reconnect and exponential backoff (plus jitter).
+// Exporter is the pipeline's sink stage: it ships pre-marshaled batches over
+// QUIC with reconnect and exponential backoff (plus jitter).
 //
-// Note on semantics: while there is no WAL, a failed batch is handed back to
-// the batch processor. Once WAL lands the retry policy becomes "keep retrying,
-// the data is durable" instead of "give up after N attempts".
+// Retry semantics: a limited number of attempts is made and the error is
+// returned to the caller. With WAL enabled the caller is the WAL consumer,
+// which keeps retrying indefinitely — the data is durable, so there is no
+// "give up and drop" path anymore.
 type Exporter struct {
 	client     *quic.Client
 	maxRetries int
@@ -29,8 +29,9 @@ func NewExporter(client *quic.Client, maxRetries int) *Exporter {
 	}
 }
 
-func (e *Exporter) Export(ctx context.Context, req *protocol.ExportMetricsRequest) error {
-	if req == nil || len(req.ScopeMetrics) == 0 {
+// ExportBytes ships a pre-marshaled batch (length-prefixed on the wire).
+func (e *Exporter) ExportBytes(ctx context.Context, payload []byte) error {
+	if len(payload) == 0 {
 		return nil
 	}
 
@@ -55,11 +56,11 @@ func (e *Exporter) Export(ctx context.Context, req *protocol.ExportMetricsReques
 			}
 		}
 
-		if err := e.client.SendBatchMetrics(ctx, req); err != nil {
-			lastErr = fmt.Errorf("failed to send batch metric: %w", err)
+		if err := e.client.SendRaw(ctx, payload); err != nil {
+			lastErr = fmt.Errorf("failed to send batch: %w", err)
 			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("failed to send metric after %d attempts: %w", e.maxRetries, lastErr)
+	return fmt.Errorf("failed to send batch after %d attempts: %w", e.maxRetries, lastErr)
 }

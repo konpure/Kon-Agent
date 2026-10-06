@@ -1,10 +1,6 @@
 package pipeline
 
-import (
-	"context"
-
-	"github.com/konpure/Kon-Agent/internal/transport/buffer"
-)
+import "context"
 
 // Processor is one stage of the agent pipeline (batch pass-through semantics).
 //
@@ -14,5 +10,5 @@ import (
 // consumed everything (e.g. a downsampling stage still filling its window).
 type Processor interface {
 	Name() string
-	Process(ctx context.Context, batch []*buffer.Item) ([]*buffer.Item, error)
+	Process(ctx context.Context, batch []*Item) ([]*Item, error)
 }

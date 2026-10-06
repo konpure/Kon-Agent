@@ -4,14 +4,13 @@ import (
 	"os"
 	"time"
 
-	"github.com/konpure/Kon-Agent/internal/transport/buffer"
 	"github.com/konpure/Kon-Agent/pkg/protocol"
 )
 
 // AssembleExportRequest builds the OTLP-style three-layer request:
 // Resource -> ScopeMetrics -> Metric. Data points of the same metric
 // (e.g. several disk partitions) are merged into one Metric message.
-func AssembleExportRequest(agentID string, items []*buffer.Item) *protocol.ExportMetricsRequest {
+func AssembleExportRequest(agentID string, items []*Item) *protocol.ExportMetricsRequest {
 	req := &protocol.ExportMetricsRequest{
 		Resource: &protocol.Resource{
 			AgentId:    agentID,

@@ -4,19 +4,18 @@ import (
 	"context"
 	"log/slog"
 	"sync"
-
-	"github.com/konpure/Kon-Agent/internal/transport/buffer"
 )
 
 // BatchProcessor accumulates items and releases a batch when the size trigger
 // fires; the time trigger is owned by the pipeline driver (see Take).
 //
-// It is the pipeline's first stage and also holds batches whose export failed,
-// until WAL takes over that responsibility.
+// It is the pipeline's first stage. With WAL disabled it also holds batches
+// whose export failed; with WAL enabled durability is the WAL's job and
+// requeue only covers WAL append failures.
 type BatchProcessor struct {
 	maxBatch   int
 	maxPending int
-	pending    []*buffer.Item
+	pending    []*Item
 	mu         sync.Mutex
 }
 
@@ -32,7 +31,7 @@ func (b *BatchProcessor) Name() string {
 }
 
 // Process appends incoming items and returns a batch once maxBatch is reached.
-func (b *BatchProcessor) Process(_ context.Context, in []*buffer.Item) ([]*buffer.Item, error) {
+func (b *BatchProcessor) Process(_ context.Context, in []*Item) ([]*Item, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -44,15 +43,15 @@ func (b *BatchProcessor) Process(_ context.Context, in []*buffer.Item) ([]*buffe
 }
 
 // Take releases everything pending (time trigger or shutdown flush).
-func (b *BatchProcessor) Take() []*buffer.Item {
+func (b *BatchProcessor) Take() []*Item {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.takeLocked()
 }
 
 // Requeue returns a failed batch to the front of the pending queue so it is
-// retried before newer data. Once WAL exists this becomes unnecessary.
-func (b *BatchProcessor) Requeue(items []*buffer.Item) {
+// retried before newer data.
+func (b *BatchProcessor) Requeue(items []*Item) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -71,7 +70,7 @@ func (b *BatchProcessor) Pending() int {
 	return len(b.pending)
 }
 
-func (b *BatchProcessor) append(items []*buffer.Item) {
+func (b *BatchProcessor) append(items []*Item) {
 	b.pending = append(b.pending, items...)
 	if len(b.pending) > b.maxPending {
 		dropped := len(b.pending) - b.maxPending
@@ -80,7 +79,7 @@ func (b *BatchProcessor) append(items []*buffer.Item) {
 	}
 }
 
-func (b *BatchProcessor) takeLocked() []*buffer.Item {
+func (b *BatchProcessor) takeLocked() []*Item {
 	if len(b.pending) == 0 {
 		return nil
 	}
