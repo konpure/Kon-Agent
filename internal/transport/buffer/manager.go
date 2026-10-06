@@ -1,9 +1,17 @@
 package buffer
 
 import (
-	"github.com/konpure/Kon-Agent/pkg/protocol"
 	"sync"
+
+	"github.com/konpure/Kon-Agent/pkg/protocol"
 )
+
+// Item is a buffered metric together with its instrumentation scope
+// (the producing plugin's name).
+type Item struct {
+	Scope  string
+	Metric *protocol.Metric
+}
 
 type Manager struct {
 	buffers map[string]*RingBuffer
@@ -40,7 +48,7 @@ func (m *Manager) GetOrCreateBuffer(name string, size int) (*RingBuffer, error) 
 	return newBuf, nil
 }
 
-func (m *Manager) GetBatch(bufferName string, maxCount int) ([]*protocol.Metric, error) {
+func (m *Manager) GetBatch(bufferName string, maxCount int) ([]*Item, error) {
 	buf, err := m.GetOrCreateBuffer(bufferName, 1024)
 	if err != nil {
 		return nil, err
@@ -51,23 +59,23 @@ func (m *Manager) GetBatch(bufferName string, maxCount int) ([]*protocol.Metric,
 		return nil, err
 	}
 
-	metrics := make([]*protocol.Metric, 0, len(items))
+	result := make([]*Item, 0, len(items))
 	for _, item := range items {
-		if metric, ok := item.(*protocol.Metric); ok {
-			metrics = append(metrics, metric)
+		if it, ok := item.(*Item); ok {
+			result = append(result, it)
 		}
 	}
-	return metrics, nil
+	return result, nil
 }
 
-func (m *Manager) PutBatch(bufferName string, metrics []*protocol.Metric) error {
+func (m *Manager) PutBatch(bufferName string, items []*Item) error {
 	buf, err := m.GetOrCreateBuffer(bufferName, 1024)
 	if err != nil {
 		return err
 	}
 
-	for _, metric := range metrics {
-		if err := buf.Put(metric); err != nil {
+	for _, item := range items {
+		if err := buf.Put(item); err != nil {
 			return err
 		}
 	}
@@ -75,10 +83,10 @@ func (m *Manager) PutBatch(bufferName string, metrics []*protocol.Metric) error 
 	return nil
 }
 
-func (m *Manager) PutMetric(bufferName string, metric *protocol.Metric) error {
+func (m *Manager) PutMetric(bufferName string, item *Item) error {
 	buf, err := m.GetOrCreateBuffer(bufferName, 1024)
 	if err != nil {
 		return err
 	}
-	return buf.Put(metric)
+	return buf.Put(item)
 }

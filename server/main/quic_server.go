@@ -31,7 +31,7 @@ func main() {
 	// TLS配置
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
-		NextProtos:   []string{"kon-agent"},
+		NextProtos:   []string{protocol.ALPN()},
 		Rand:         rand.Reader,
 		MinVersion:   tls.VersionTLS13,
 		MaxVersion:   tls.VersionTLS13,
@@ -179,40 +179,57 @@ func handleUniStream(stream *quic.ReceiveStream) {
 			return
 		}
 
-		// 解析Protobuf数据
-		var batchReq protocol.BatchMetricsRequest
-		if err := proto.Unmarshal(data, &batchReq); err != nil {
-			// 如果不是BatchMetricsRequest，尝试解析为单个Metric
-			var metric protocol.Metric
-			if err := proto.Unmarshal(data, &metric); err != nil {
-				log.Printf("Failed to unmarshal data from stream %d: %v", stream.StreamID(), err)
-				// 输出原始数据供调试
-				fmt.Printf("Received from stream %d:\n", stream.StreamID())
-				fmt.Printf("Hex: %x\n", data)
-				fmt.Printf("Raw (binary data, may contain garbled text): %s\n", string(data))
-				fmt.Println("---")
-				continue
-			}
-			// 成功解析为单个Metric
-			fmt.Printf("Received Metric from stream %d:\n", stream.StreamID())
-			fmt.Printf("Name: %s\n", metric.Name)
-			fmt.Printf("Value: %.2f\n", metric.Value)
-			fmt.Printf("Timestamp: %d\n", metric.Timestamp)
-			fmt.Printf("Type: %s\n", metric.Type.String())
-			if len(metric.Labels) > 0 {
-				fmt.Printf("Labels: %v\n", metric.Labels)
-			}
-			fmt.Println("---")
-		} else {
-			// 成功解析为BatchMetricsRequest
-			fmt.Printf("Received BatchMetricsRequest from stream %d:\n", stream.StreamID())
-			fmt.Printf("Agent ID: %s\n", batchReq.AgentId)
-			fmt.Printf("Timestamp: %d\n", batchReq.Timestamp)
-			fmt.Printf("Metrics count: %d\n", len(batchReq.Metrics))
-			for i, metric := range batchReq.Metrics {
-				fmt.Printf("  Metric %d: %s=%.2f (type: %s)\n", i+1, metric.Name, metric.Value, metric.Type.String())
-			}
-			fmt.Println("---")
+		// 解析Protobuf数据（协议 v2）
+		var req protocol.ExportMetricsRequest
+		if err := proto.Unmarshal(data, &req); err != nil {
+			log.Printf("Failed to unmarshal ExportMetricsRequest from stream %d: %v", stream.StreamID(), err)
+			continue
 		}
+		printExportRequest(stream.StreamID(), &req)
+	}
+}
+
+// printExportRequest prints the OTLP-style three-layer structure for debugging.
+func printExportRequest(streamID quic.StreamID, req *protocol.ExportMetricsRequest) {
+	fmt.Printf("Received ExportMetricsRequest from stream %d:\n", streamID)
+	if res := req.GetResource(); res != nil {
+		fmt.Printf("Agent ID: %s\n", res.GetAgentId())
+		fmt.Printf("Resource attributes: %v\n", res.GetAttributes())
+	}
+	fmt.Printf("Export time: %d\n", req.GetExportTimeUnixNano())
+	for _, sm := range req.GetScopeMetrics() {
+		fmt.Printf("  Scope: %s, metrics: %d\n", sm.GetScope().GetName(), len(sm.GetMetrics()))
+		for _, m := range sm.GetMetrics() {
+			fmt.Printf("    %s (unit: %q): %s, points: %d\n",
+				m.GetName(), m.GetUnit(), dataKind(m), dataPointCount(m))
+		}
+	}
+	fmt.Println("---")
+}
+
+func dataKind(m *protocol.Metric) string {
+	switch m.GetData().(type) {
+	case *protocol.Metric_Gauge:
+		return "Gauge"
+	case *protocol.Metric_Sum:
+		return fmt.Sprintf("Sum(temporality=%s, monotonic=%t)",
+			m.GetSum().GetTemporality(), m.GetSum().GetIsMonotonic())
+	case *protocol.Metric_Histogram:
+		return "Histogram"
+	default:
+		return "Unknown"
+	}
+}
+
+func dataPointCount(m *protocol.Metric) int {
+	switch d := m.GetData().(type) {
+	case *protocol.Metric_Gauge:
+		return len(d.Gauge.GetDataPoints())
+	case *protocol.Metric_Sum:
+		return len(d.Sum.GetDataPoints())
+	case *protocol.Metric_Histogram:
+		return len(d.Histogram.GetDataPoints())
+	default:
+		return 0
 	}
 }

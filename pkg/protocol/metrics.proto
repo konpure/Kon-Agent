@@ -3,43 +3,109 @@ package protocol;
 
 option go_package = "github.com/konpure/Kon-Agent/pkg/protocol";
 
-enum MetricType {
-  CPU_USAGE = 0;
-  MEMORY_USAGE = 1;
-  NETWORK_PACKETS = 2;
-  EBPF_RAW = 3;
+// Protocol v2 — OTLP-inspired three-layer metrics model.
+//
+// Design references:
+//   - OpenTelemetry OTLP Metrics: Resource -> ScopeMetrics -> Metric hierarchy,
+//     oneof data (Gauge/Sum/Histogram), temporality & monotonic semantics, unit.
+//   - Google Monarch (VLDB 2020): typed schema with distribution as a
+//     first-class citizen; pre-aggregation at the edge.
+
+// ExportMetricsRequest is the top-level wire message sent by the agent.
+message ExportMetricsRequest {
+  Resource resource = 1;
+  repeated ScopeMetrics scope_metrics = 2;
+  // Agent-side wall clock when this batch was assembled.
+  int64 export_time_unix_nano = 3;
 }
 
-message Metric {
-  int64 timestamp = 1;
-  string name = 2;
-  double value = 3;
-  map<string, string> labels = 4;
-  MetricType type = 5;
-  bytes payload = 6;
-}
-
-message MetricsRequest {
-  string agent_id = 1;
-}
-
-message MetricsResponse {
-  repeated Metric metrics = 1;
-}
-
-message BatchMetricsRequest {
-  repeated Metric metrics = 1;
-  string agent_id = 2;
-  int64 timestamp = 3;
-}
-
-message BatchMetricsResponse {
+message ExportMetricsResponse {
   bool success = 1;
   string message = 2;
   int32 accepted_count = 3;
   int32 rejected_count = 4;
 }
 
+// Resource describes the entity producing the metrics (the edge agent).
+message Resource {
+  string agent_id = 1;
+  // Low-cardinality attributes only (e.g. host.name). High-cardinality
+  // values such as connection_id are forbidden (tag/field discipline).
+  map<string, string> attributes = 2;
+}
+
+// InstrumentationScope identifies the producing plugin.
+message InstrumentationScope {
+  string name = 1; // plugin name, e.g. "cpu", "ebpf"
+  string version = 2;
+}
+
+// ScopeMetrics groups metrics produced by the same plugin.
+message ScopeMetrics {
+  InstrumentationScope scope = 1;
+  repeated Metric metrics = 2;
+}
+
+// Metric carries exactly one typed data stream.
+message Metric {
+  string name = 1;
+  // UCUM unit annotation, e.g. "1" (ratio), "By" (bytes), "{packet}".
+  string unit = 2;
+  string description = 3;
+
+  oneof data {
+    Gauge gauge = 4;
+    Sum sum = 5;
+    Histogram histogram = 6;
+  }
+}
+
+message Gauge {
+  repeated NumberDataPoint data_points = 1;
+}
+
+// AggregationTemporality tells the backend how to compute rates.
+// Without it, rate() semantics are ambiguous — this is why OTLP makes
+// it mandatory on Sum.
+enum AggregationTemporality {
+  AGGREGATION_TEMPORALITY_UNSPECIFIED = 0;
+  AGGREGATION_TEMPORALITY_DELTA = 1;
+  AGGREGATION_TEMPORALITY_CUMULATIVE = 2;
+}
+
+message Sum {
+  repeated NumberDataPoint data_points = 1;
+  AggregationTemporality temporality = 2;
+  bool is_monotonic = 3;
+}
+
+// Histogram stores bucket counts instead of raw samples: constant space
+// and cross-instance aggregability (Monarch distribution / OTLP Histogram).
+message Histogram {
+  repeated HistogramDataPoint data_points = 1;
+  AggregationTemporality temporality = 2;
+}
+
+message NumberDataPoint {
+  // Per-series attributes; keep cardinality low.
+  map<string, string> attributes = 1;
+  int64 time_unix_nano = 2;
+  double value = 3;
+}
+
+message HistogramDataPoint {
+  map<string, string> attributes = 1;
+  int64 time_unix_nano = 2;
+  uint64 count = 3;
+  double sum = 4;
+  // bucket_counts[i] counts observations in
+  //   (explicit_bounds[i-1], explicit_bounds[i]]; len = len(explicit_bounds)+1.
+  repeated uint64 bucket_counts = 5;
+  repeated double explicit_bounds = 6;
+  double min = 7;
+  double max = 8;
+}
+
 service MetricsService {
-  rpc SendBatchMetrics (BatchMetricsRequest) returns (BatchMetricsResponse);
+  rpc SendBatchMetrics(ExportMetricsRequest) returns (ExportMetricsResponse);
 }

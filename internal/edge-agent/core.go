@@ -109,23 +109,24 @@ func (c *Core) Run() error {
 				slog.Info("Flushing metrics from buffer", "count", metricsCount)
 
 				batchSize := 100
-				metrics, err := c.bufferManager.GetBatch("default", batchSize)
+				items, err := c.bufferManager.GetBatch("default", batchSize)
 				if err != nil {
 					slog.Error("Failed to get metrics batch", "error", err)
 					continue
 				}
-				if len(metrics) == 0 {
+				if len(items) == 0 {
 					slog.Debug("No metrics to send in batch")
 					continue
 				}
 
-				if err := c.sendMetricWithRetry(ctx, metrics, 3); err != nil {
+				req := buildExportRequest(c.cfg.ClientId, items)
+				if err := c.sendMetricWithRetry(ctx, req, 3); err != nil {
 					slog.Error("Failed to send metrics batch", "error", err)
-					if putErr := c.bufferManager.PutBatch("default", metrics); putErr != nil {
+					if putErr := c.bufferManager.PutBatch("default", items); putErr != nil {
 						slog.Error("Failed to re-insert failed metrics", "error", putErr)
 					}
 				} else {
-					slog.Info("Successfully sent metrics batch", "count", len(metrics))
+					slog.Info("Successfully sent metrics batch", "count", len(items))
 				}
 			case <-ctx.Done():
 				slog.Info("Shutting down metric flush goroutine")
@@ -146,14 +147,12 @@ func (c *Core) Run() error {
 					"value", event.Values,
 					"labels", event.Labels)
 
-				metric := &protocol.Metric{
-					Timestamp: event.Time,
-					Name:      event.Name,
-					Value:     event.Values,
-					Labels:    event.Labels,
+				item := &buffer.Item{
+					Scope:  event.Scope,
+					Metric: eventToMetric(event),
 				}
 
-				if err := c.bufferManager.PutMetric("default", metric); err != nil {
+				if err := c.bufferManager.PutMetric("default", item); err != nil {
 					slog.Error("Failed to put metric into buffer", "error", err)
 					c.StateManager.RecordError("buffer_put_failed")
 				}
@@ -208,8 +207,8 @@ func (c *Core) Run() error {
 	return nil
 }
 
-func (c *Core) sendMetricWithRetry(ctx context.Context, metrics []*protocol.Metric, maxRetries int) error {
-	if len(metrics) == 0 {
+func (c *Core) sendMetricWithRetry(ctx context.Context, req *protocol.ExportMetricsRequest, maxRetries int) error {
+	if req == nil || len(req.ScopeMetrics) == 0 {
 		return nil
 	}
 
@@ -232,12 +231,6 @@ func (c *Core) sendMetricWithRetry(ctx context.Context, metrics []*protocol.Metr
 				lastErr = fmt.Errorf("Failed to connect to QUIC server: %w", err)
 				continue
 			}
-		}
-
-		req := &protocol.BatchMetricsRequest{
-			Metrics:   metrics,
-			AgentId:   c.cfg.ClientId,
-			Timestamp: time.Now().UnixNano(),
 		}
 
 		if err := c.client.SendBatchMetrics(ctx, req); err != nil {

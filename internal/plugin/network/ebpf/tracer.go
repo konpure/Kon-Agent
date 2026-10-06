@@ -2,6 +2,7 @@ package ebpf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -67,19 +68,21 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 	for {
 		select {
 		case <-ticker.C:
-			slog.Info("Reading packet count")
-			count, err := t.readPacketCount()
+			slog.Info("Reading packet delta")
+			count, err := t.readPacketDelta()
 			if err != nil {
-				slog.Error("Failed to read packet count", "err", err)
+				slog.Error("Failed to read packet delta", "err", err)
 				continue
 			}
-			slog.Info("Successfully read packet count", "count", count)
+			slog.Info("Successfully read packet delta", "count", count)
 
 			out <- plugin.Event{
 				Name:   "network_packets_total",
 				Time:   time.Now().UnixNano(),
 				Labels: map[string]string{"interface": t.getDefaultInterfaceName()},
 				Values: float64(count),
+				Scope:  "ebpf",
+				Kind:   plugin.KindSumDelta,
 			}
 			slog.Info("Successfully sent packet count event")
 		case <-ctx.Done():
@@ -181,7 +184,10 @@ func (t *Tracer) closeCollector() {
 	}
 }
 
-func (t *Tracer) readPacketCount() (uint64, error) {
+// readPacketDelta reads the packet counter and clears the kernel map entry
+// (read-then-clear), so each reported value is the delta of the last
+// collection window — matching Sum{temporality: DELTA} semantics.
+func (t *Tracer) readPacketDelta() (uint64, error) {
 	var result uint64
 	var resultErr error
 
@@ -200,8 +206,13 @@ func (t *Tracer) readPacketCount() (uint64, error) {
 		var key uint32 = 0
 		var value uint64
 
-		if err := t.collector.pktCount.Lookup(&key, &value); err != nil {
-			resultErr = fmt.Errorf("failed to lookup packet count: %w", err)
+		if err := t.collector.pktCount.LookupAndDelete(&key, &value); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				// No packets arrived in this window.
+				result = 0
+				return
+			}
+			resultErr = fmt.Errorf("failed to lookup and delete packet count: %w", err)
 			return
 		}
 

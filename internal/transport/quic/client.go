@@ -35,7 +35,7 @@ func NewClient(serverAddr string) *Client {
 		serverAddr: serverAddr,
 		tlsConfig: &tls.Config{
 			InsecureSkipVerify: true, // For development only
-			NextProtos:         []string{"kon-agent"},
+			NextProtos:         []string{protocol.ALPN()},
 		},
 		quicConfig: &quic.Config{
 			KeepAlivePeriod: 10 * time.Second,
@@ -148,83 +148,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) SendMetric(ctx context.Context, metric *protocol.Metric) error {
-	c.mutex.Lock()
-	conn := c.conn
-	c.mutex.Unlock()
-
-	if conn == nil {
-		return fmt.Errorf("Not connected to QUIC server")
-	}
-
-	stream, err := c.getStream(ctx)
-	if err != nil {
-		if isConnectionClosed(err) {
-			c.mutex.Lock()
-			c.conn = nil
-			c.mutex.Unlock()
-		}
-		return fmt.Errorf("Failed to open stream: %w", err)
-	}
-
-	defer func() {
-		if stream.Context().Err() == nil {
-			select {
-			case c.streamPool <- stream:
-				// stream has been returned to pool
-			default:
-				// stream is not returned to pool, close it
-				stream.Close()
-			}
-		} else {
-			stream.Close()
-		}
-	}()
-
-	data, err := proto.Marshal(metric)
-	if err != nil {
-		return fmt.Errorf("Failed to marshal metric: %w", err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		length := uint32(len(data))
-		lengthBuf := make([]byte, 4)
-		lengthBuf[0] = byte(length >> 24)
-		lengthBuf[1] = byte(length >> 16)
-		lengthBuf[2] = byte(length >> 8)
-		lengthBuf[3] = byte(length)
-
-		if _, err := stream.Write(lengthBuf); err != nil {
-			done <- fmt.Errorf("Failed to write length: %w", err)
-			return
-		}
-
-		if _, err := stream.Write(data); err != nil {
-			done <- fmt.Errorf("Failed to write data: %w", err)
-			return
-		}
-
-		done <- nil
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			if isConnectionClosed(err) {
-				c.mutex.Lock()
-				c.conn = nil
-				c.mutex.Unlock()
-			}
-			return fmt.Errorf("Failed to send metric: %w", err)
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.BatchMetricsRequest) error {
+func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.ExportMetricsRequest) error {
 	c.mutex.Lock()
 	conn := c.conn
 	c.mutex.Unlock()

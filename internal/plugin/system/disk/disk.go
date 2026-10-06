@@ -77,6 +77,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: labels,
 					Values: usage.UsedPercent,
+					Scope:  "disk",
+					Kind:   plugin.KindGauge,
 				}
 
 				// Send disk usage bytes
@@ -85,6 +87,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: labels,
 					Values: float64(usage.Used),
+					Scope:  "disk",
+					Kind:   plugin.KindGauge,
 				}
 
 				// Send disk total bytes
@@ -93,6 +97,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: labels,
 					Values: float64(usage.Total),
+					Scope:  "disk",
+					Kind:   plugin.KindGauge,
 				}
 
 				// Send disk free bytes
@@ -101,6 +107,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: labels,
 					Values: float64(usage.Free),
+					Scope:  "disk",
+					Kind:   plugin.KindGauge,
 				}
 			}
 
@@ -122,6 +130,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: labels,
 					Values: float64(stat.ReadBytes),
+					Scope:  "disk",
+					Kind:   plugin.KindSumCumulative,
 				}
 
 				out <- plugin.Event{
@@ -129,6 +139,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: labels,
 					Values: float64(stat.WriteBytes),
+					Scope:  "disk",
+					Kind:   plugin.KindSumCumulative,
 				}
 
 				out <- plugin.Event{
@@ -136,6 +148,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: labels,
 					Values: float64(stat.ReadCount),
+					Scope:  "disk",
+					Kind:   plugin.KindSumCumulative,
 				}
 
 				out <- plugin.Event{
@@ -143,6 +157,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: labels,
 					Values: float64(stat.WriteCount),
+					Scope:  "disk",
+					Kind:   plugin.KindSumCumulative,
 				}
 
 				// Calculate and send IO deltas if we have previous stats
@@ -159,6 +175,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 							Time:   time.Now().UnixNano(),
 							Labels: labels,
 							Values: float64(readBytesDelta),
+							Scope:  "disk",
+							Kind:   plugin.KindSumDelta,
 						}
 					}
 
@@ -168,6 +186,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 							Time:   time.Now().UnixNano(),
 							Labels: labels,
 							Values: float64(writeBytesDelta),
+							Scope:  "disk",
+							Kind:   plugin.KindSumDelta,
 						}
 					}
 
@@ -177,6 +197,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 							Time:   time.Now().UnixNano(),
 							Labels: labels,
 							Values: float64(readCountDelta),
+							Scope:  "disk",
+							Kind:   plugin.KindSumDelta,
 						}
 					}
 
@@ -186,6 +208,8 @@ func (d *DiskPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 							Time:   time.Now().UnixNano(),
 							Labels: labels,
 							Values: float64(writeCountDelta),
+							Scope:  "disk",
+							Kind:   plugin.KindSumDelta,
 						}
 					}
 				}

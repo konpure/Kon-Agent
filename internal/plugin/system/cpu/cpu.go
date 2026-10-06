@@ -53,6 +53,8 @@ func (c *Collector) Run(ctx context.Context, out chan<- plugin.Event) error {
 				Time:   time.Now().UnixNano(),
 				Labels: map[string]string{"mode": "user"},
 				Values: v,
+				Scope:  "cpu",
+				Kind:   plugin.KindGauge,
 			}
 		case <-ctx.Done():
 			slog.Info("CPU collector stopped by context")
