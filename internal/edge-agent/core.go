@@ -2,16 +2,12 @@ package edge_agent
 
 import (
 	"context"
-	"fmt"
 	"github.com/konpure/Kon-Agent/internal/config"
+	"github.com/konpure/Kon-Agent/internal/pipeline"
 	"github.com/konpure/Kon-Agent/internal/plugin"
 	"github.com/konpure/Kon-Agent/internal/security"
-	"github.com/konpure/Kon-Agent/internal/transport/buffer"
 	"github.com/konpure/Kon-Agent/internal/transport/quic"
-	"github.com/konpure/Kon-Agent/pkg/protocol"
 	"log/slog"
-	"math"
-	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,7 +20,6 @@ type Core struct {
 	client          *quic.Client
 	resourceManager *ResourceManager
 	StateManager    *StateManager
-	bufferManager   *buffer.Manager
 }
 
 func New(cfg *config.Config) *Core {
@@ -37,14 +32,12 @@ func New(cfg *config.Config) *Core {
 	// Init StateManager
 	stateManager := NewStateManager(cfg.Cache.Path + string(os.PathSeparator) + "agent_state.json")
 
-	bufferManager := buffer.NewManager()
 	return &Core{
 		cfg:             cfg,
 		plugins:         pluginManager,
 		client:          client,
 		resourceManager: resourceManager,
 		StateManager:    stateManager,
-		bufferManager:   bufferManager,
 	}
 }
 
@@ -90,79 +83,23 @@ func (c *Core) Run() error {
 		slog.Info("Successfully dropped privileges to minimal set")
 	}
 
-	go func(ctx context.Context) {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
+	// Build the explicit pipeline: receiver -> [batch] -> [sampling] -> exporter.
+	pipe := pipeline.New(pipeline.Config{
+		AgentID:       c.cfg.ClientId,
+		MaxBatchSize:  100,
+		MaxPending:    1024,
+		FlushInterval: 5 * time.Second,
+		MaxRetries:    3,
+		OnExported: func(count int) {
+			c.StateManager.IncrementMetricSent()
+			slog.Info("Successfully sent metrics batch", "data_points", count)
+		},
+		OnError: func(errorType string) {
+			c.StateManager.RecordError(errorType)
+		},
+	}, c.plugins.Events(), c.client)
 
-		for {
-			select {
-			case <-ticker.C:
-				buf, err := c.bufferManager.GetOrCreateBuffer("default", 1024)
-				if err != nil {
-					slog.Error("Failed to get buffer", "error", err)
-					continue
-				}
-				metricsCount := buf.Len()
-				if metricsCount == 0 {
-					continue
-				}
-				slog.Info("Flushing metrics from buffer", "count", metricsCount)
-
-				batchSize := 100
-				items, err := c.bufferManager.GetBatch("default", batchSize)
-				if err != nil {
-					slog.Error("Failed to get metrics batch", "error", err)
-					continue
-				}
-				if len(items) == 0 {
-					slog.Debug("No metrics to send in batch")
-					continue
-				}
-
-				req := buildExportRequest(c.cfg.ClientId, items)
-				if err := c.sendMetricWithRetry(ctx, req, 3); err != nil {
-					slog.Error("Failed to send metrics batch", "error", err)
-					if putErr := c.bufferManager.PutBatch("default", items); putErr != nil {
-						slog.Error("Failed to re-insert failed metrics", "error", putErr)
-					}
-				} else {
-					slog.Info("Successfully sent metrics batch", "count", len(items))
-				}
-			case <-ctx.Done():
-				slog.Info("Shutting down metric flush goroutine")
-				return
-			}
-		}
-	}(ctx)
-
-	go func(ctx context.Context) {
-		for {
-			select {
-			case event, ok := <-c.plugins.Events():
-				if !ok {
-					return // Channel closed
-				}
-				slog.Info("Received event",
-					"event", event.Name,
-					"value", event.Values,
-					"labels", event.Labels)
-
-				item := &buffer.Item{
-					Scope:  event.Scope,
-					Metric: eventToMetric(event),
-				}
-
-				if err := c.bufferManager.PutMetric("default", item); err != nil {
-					slog.Error("Failed to put metric into buffer", "error", err)
-					c.StateManager.RecordError("buffer_put_failed")
-				}
-
-			case <-ctx.Done():
-				slog.Info("Event handler stopped")
-				return
-			}
-		}
-	}(ctx)
+	go pipe.Run(ctx)
 
 	go func() {
 		for statusChange := range c.plugins.PluginStatusChanges() {
@@ -195,11 +132,21 @@ func (c *Core) Run() error {
 	<-sigChan
 	slog.Info("Shutting down agent...")
 
+	// 1) Stop collection first so no new events are produced.
+	c.plugins.Stop()
+
+	// 2) Flush the tail batch and let the last export finish.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := pipe.Shutdown(shutdownCtx); err != nil {
+		slog.Error("Pipeline shutdown did not complete", "error", err)
+	}
+
+	// 3) Close the transport only after the pipeline is drained.
 	if err := c.client.Close(); err != nil {
 		slog.Error("Failed to close QUIC connection", "error", err)
 	}
 
-	c.plugins.Stop()
 	c.resourceManager.Stop()
 	c.StateManager.Stop()
 
@@ -207,37 +154,4 @@ func (c *Core) Run() error {
 	return nil
 }
 
-func (c *Core) sendMetricWithRetry(ctx context.Context, req *protocol.ExportMetricsRequest, maxRetries int) error {
-	if req == nil || len(req.ScopeMetrics) == 0 {
-		return nil
-	}
-
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			sleepDuration := time.Duration(math.Pow(2, float64(attempt))) * 100 * time.Millisecond
-			jitter := time.Duration(rand.Int63n(int64(sleepDuration)))
-			sleepDuration += jitter
-
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("context cancelled while retrying: %w", ctx.Err())
-			case <-time.After(sleepDuration):
-			}
-		}
-
-		if !c.client.IsConnected() {
-			if err := c.client.Connect(ctx); err != nil {
-				lastErr = fmt.Errorf("Failed to connect to QUIC server: %w", err)
-				continue
-			}
-		}
-
-		if err := c.client.SendBatchMetrics(ctx, req); err != nil {
-			lastErr = fmt.Errorf("Failed to send batch metric: %w", err)
-			continue
-		}
-		return nil
-	}
-	return fmt.Errorf("Failed to send metric after %d attempts: %w", maxRetries, lastErr)
-}
+// (export retry logic now lives in internal/pipeline/exporter.go)
