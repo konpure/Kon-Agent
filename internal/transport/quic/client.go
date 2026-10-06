@@ -81,7 +81,7 @@ func (c *Client) initStreamPool() {
 					if stream != nil && stream.Context().Err() == nil {
 						tempPool = append(tempPool, stream)
 					} else if stream != nil {
-						stream.Close()
+						_ = stream.Close()
 					}
 				}
 
@@ -91,7 +91,7 @@ func (c *Client) initStreamPool() {
 						// stream has been returned to pool
 					default:
 						// stream is not returned to pool, close it
-						stream.Close()
+						_ = stream.Close()
 					}
 				}
 			}
@@ -117,7 +117,7 @@ func (c *Client) createNewStream(ctx context.Context) (*quic.SendStream, error) 
 	c.mutex.Unlock()
 
 	if conn == nil {
-		return nil, fmt.Errorf("Not connected to QUIC server")
+		return nil, fmt.Errorf("not connected to QUIC server")
 	}
 	return conn.OpenUniStreamSync(ctx)
 }
@@ -136,7 +136,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	conn, err := quic.DialAddr(ctx, serverAddr, c.tlsConfig, c.quicConfig)
 	if err != nil {
-		return fmt.Errorf("Failed to dial QUIC server: %w", err)
+		return fmt.Errorf("failed to dial QUIC server: %w", err)
 	}
 
 	c.conn = conn
@@ -148,13 +148,25 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
+// SendBatchMetrics marshals the request and ships it via SendRaw.
 func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.ExportMetricsRequest) error {
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal batch metrics: %w", err)
+	}
+	return c.SendRaw(ctx, data)
+}
+
+// SendRaw ships pre-marshaled bytes (length-prefixed) over a pooled stream.
+// The WAL consumer uses it to replay records without re-marshaling, so the
+// bytes on the wire are exactly the bytes that were persisted.
+func (c *Client) SendRaw(ctx context.Context, data []byte) error {
 	c.mutex.Lock()
 	conn := c.conn
 	c.mutex.Unlock()
 
 	if conn == nil {
-		return fmt.Errorf("Not connected to QUIC server")
+		return fmt.Errorf("not connected to QUIC server")
 	}
 
 	stream, err := c.getStream(ctx)
@@ -164,7 +176,7 @@ func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.ExportMetri
 			c.conn = nil
 			c.mutex.Unlock()
 		}
-		return fmt.Errorf("Failed to open stream: %w", err)
+		return fmt.Errorf("failed to open stream: %w", err)
 	}
 
 	defer func() {
@@ -174,17 +186,12 @@ func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.ExportMetri
 				// stream has been returned to pool
 			default:
 				// stream is not returned to pool, close it
-				stream.Close()
+				_ = stream.Close()
 			}
 		} else {
-			stream.Context()
+			_ = stream.Close()
 		}
 	}()
-
-	data, err := proto.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("Failed to marshal batch metrics: %w", err)
-	}
 
 	length := uint32(len(data))
 	lengthBuf := make([]byte, 4)
@@ -194,11 +201,11 @@ func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.ExportMetri
 	lengthBuf[3] = byte(length)
 
 	if _, err := stream.Write(lengthBuf); err != nil {
-		return fmt.Errorf("Failed to write length: %w", err)
+		return fmt.Errorf("failed to write length: %w", err)
 	}
 
 	if _, err := stream.Write(data); err != nil {
-		return fmt.Errorf("Failed to write data: %w", err)
+		return fmt.Errorf("failed to write data: %w", err)
 	}
 	return nil
 }
