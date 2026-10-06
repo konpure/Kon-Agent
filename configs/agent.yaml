@@ -16,3 +16,9 @@ plugins:
 cache:
   path: /tmp/edge_agent.cache
   max_size: 50MB
+wal:
+  enable: true
+  dir: /tmp/edge_agent.cache/wal
+  segment_size: 16MB
+  max_size: 128MB
+  fsync_interval: 1s

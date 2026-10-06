@@ -1,9 +1,11 @@
 package config
 
 import (
+	"os"
+	"time"
+
 	"github.com/konpure/Kon-Agent/pkg/plugin"
 	"gopkg.in/yaml.v3"
-	"os"
 )
 
 type Config struct {
@@ -14,6 +16,13 @@ type Config struct {
 		Path    string `yaml:"path"`
 		MaxSize string `yaml:"max_size"`
 	} `yaml:"cache"`
+	WAL struct {
+		Enable        bool          `yaml:"enable"`
+		Dir           string        `yaml:"dir"`
+		SegmentSize   string        `yaml:"segment_size"`
+		MaxSize       string        `yaml:"max_size"`
+		FsyncInterval time.Duration `yaml:"fsync_interval"`
+	} `yaml:"wal"`
 }
 
 func Load(path string) (*Config, error) {
