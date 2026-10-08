@@ -59,6 +59,8 @@ func (m *MemoryPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 				Time:   time.Now().UnixNano(),
 				Labels: map[string]string{"type": "virtual"},
 				Values: stats.VirtualMemory.UsedPercent,
+				Scope:  "memory",
+				Kind:   plugin.KindGauge,
 			}
 
 			// send memory usage (bytes)
@@ -67,6 +69,8 @@ func (m *MemoryPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 				Time:   time.Now().UnixNano(),
 				Labels: map[string]string{"type": "virtual"},
 				Values: float64(stats.VirtualMemory.Used),
+				Scope:  "memory",
+				Kind:   plugin.KindGauge,
 			}
 
 			// send memory total (bytes)
@@ -75,6 +79,8 @@ func (m *MemoryPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 				Time:   time.Now().UnixNano(),
 				Labels: map[string]string{"type": "virtual"},
 				Values: float64(stats.VirtualMemory.Total),
+				Scope:  "memory",
+				Kind:   plugin.KindGauge,
 			}
 
 			// send swap memory usage percentage
@@ -84,6 +90,8 @@ func (m *MemoryPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: map[string]string{"type": "swap"},
 					Values: stats.SwapMemory.UsedPercent,
+					Scope:  "memory",
+					Kind:   plugin.KindGauge,
 				}
 
 				out <- plugin.Event{
@@ -91,6 +99,8 @@ func (m *MemoryPlugin) Run(ctx context.Context, out chan<- plugin.Event) error {
 					Time:   time.Now().UnixNano(),
 					Labels: map[string]string{"type": "swap"},
 					Values: float64(stats.SwapMemory.Used),
+					Scope:  "memory",
+					Kind:   plugin.KindGauge,
 				}
 			}
 

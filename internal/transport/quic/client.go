@@ -35,7 +35,7 @@ func NewClient(serverAddr string) *Client {
 		serverAddr: serverAddr,
 		tlsConfig: &tls.Config{
 			InsecureSkipVerify: true, // For development only
-			NextProtos:         []string{"kon-agent"},
+			NextProtos:         []string{protocol.ALPN()},
 		},
 		quicConfig: &quic.Config{
 			KeepAlivePeriod: 10 * time.Second,
@@ -81,7 +81,7 @@ func (c *Client) initStreamPool() {
 					if stream != nil && stream.Context().Err() == nil {
 						tempPool = append(tempPool, stream)
 					} else if stream != nil {
-						stream.Close()
+						_ = stream.Close()
 					}
 				}
 
@@ -91,7 +91,7 @@ func (c *Client) initStreamPool() {
 						// stream has been returned to pool
 					default:
 						// stream is not returned to pool, close it
-						stream.Close()
+						_ = stream.Close()
 					}
 				}
 			}
@@ -117,7 +117,7 @@ func (c *Client) createNewStream(ctx context.Context) (*quic.SendStream, error) 
 	c.mutex.Unlock()
 
 	if conn == nil {
-		return nil, fmt.Errorf("Not connected to QUIC server")
+		return nil, fmt.Errorf("not connected to QUIC server")
 	}
 	return conn.OpenUniStreamSync(ctx)
 }
@@ -136,7 +136,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	conn, err := quic.DialAddr(ctx, serverAddr, c.tlsConfig, c.quicConfig)
 	if err != nil {
-		return fmt.Errorf("Failed to dial QUIC server: %w", err)
+		return fmt.Errorf("failed to dial QUIC server: %w", err)
 	}
 
 	c.conn = conn
@@ -148,119 +148,50 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) SendMetric(ctx context.Context, metric *protocol.Metric) error {
-	c.mutex.Lock()
-	conn := c.conn
-	c.mutex.Unlock()
-
-	if conn == nil {
-		return fmt.Errorf("Not connected to QUIC server")
-	}
-
-	stream, err := c.getStream(ctx)
-	if err != nil {
-		if isConnectionClosed(err) {
-			c.mutex.Lock()
-			c.conn = nil
-			c.mutex.Unlock()
-		}
-		return fmt.Errorf("Failed to open stream: %w", err)
-	}
-
-	defer func() {
-		if stream.Context().Err() == nil {
-			select {
-			case c.streamPool <- stream:
-				// stream has been returned to pool
-			default:
-				// stream is not returned to pool, close it
-				stream.Close()
-			}
-		} else {
-			stream.Close()
-		}
-	}()
-
-	data, err := proto.Marshal(metric)
-	if err != nil {
-		return fmt.Errorf("Failed to marshal metric: %w", err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		length := uint32(len(data))
-		lengthBuf := make([]byte, 4)
-		lengthBuf[0] = byte(length >> 24)
-		lengthBuf[1] = byte(length >> 16)
-		lengthBuf[2] = byte(length >> 8)
-		lengthBuf[3] = byte(length)
-
-		if _, err := stream.Write(lengthBuf); err != nil {
-			done <- fmt.Errorf("Failed to write length: %w", err)
-			return
-		}
-
-		if _, err := stream.Write(data); err != nil {
-			done <- fmt.Errorf("Failed to write data: %w", err)
-			return
-		}
-
-		done <- nil
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			if isConnectionClosed(err) {
-				c.mutex.Lock()
-				c.conn = nil
-				c.mutex.Unlock()
-			}
-			return fmt.Errorf("Failed to send metric: %w", err)
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.BatchMetricsRequest) error {
-	c.mutex.Lock()
-	conn := c.conn
-	c.mutex.Unlock()
-
-	if conn == nil {
-		return fmt.Errorf("Not connected to QUIC server")
-	}
-
-	stream, err := c.getStream(ctx)
-	if err != nil {
-		if isConnectionClosed(err) {
-			c.mutex.Lock()
-			c.conn = nil
-			c.mutex.Unlock()
-		}
-		return fmt.Errorf("Failed to open stream: %w", err)
-	}
-
-	defer func() {
-		if stream.Context().Err() == nil {
-			select {
-			case c.streamPool <- stream:
-				// stream has been returned to pool
-			default:
-				// stream is not returned to pool, close it
-				stream.Close()
-			}
-		} else {
-			stream.Context()
-		}
-	}()
-
+// SendBatchMetrics marshals the request and ships it via SendRaw.
+func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.ExportMetricsRequest) error {
 	data, err := proto.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("Failed to marshal batch metrics: %w", err)
+		return fmt.Errorf("failed to marshal batch metrics: %w", err)
 	}
+	return c.SendRaw(ctx, data)
+}
+
+// SendRaw ships pre-marshaled bytes (length-prefixed) over a pooled stream.
+// The WAL consumer uses it to replay records without re-marshaling, so the
+// bytes on the wire are exactly the bytes that were persisted.
+func (c *Client) SendRaw(ctx context.Context, data []byte) error {
+	c.mutex.Lock()
+	conn := c.conn
+	c.mutex.Unlock()
+
+	if conn == nil {
+		return fmt.Errorf("not connected to QUIC server")
+	}
+
+	stream, err := c.getStream(ctx)
+	if err != nil {
+		if isConnectionClosed(err) {
+			c.mutex.Lock()
+			c.conn = nil
+			c.mutex.Unlock()
+		}
+		return fmt.Errorf("failed to open stream: %w", err)
+	}
+
+	defer func() {
+		if stream.Context().Err() == nil {
+			select {
+			case c.streamPool <- stream:
+				// stream has been returned to pool
+			default:
+				// stream is not returned to pool, close it
+				_ = stream.Close()
+			}
+		} else {
+			_ = stream.Close()
+		}
+	}()
 
 	length := uint32(len(data))
 	lengthBuf := make([]byte, 4)
@@ -270,11 +201,11 @@ func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.BatchMetric
 	lengthBuf[3] = byte(length)
 
 	if _, err := stream.Write(lengthBuf); err != nil {
-		return fmt.Errorf("Failed to write length: %w", err)
+		return fmt.Errorf("failed to write length: %w", err)
 	}
 
 	if _, err := stream.Write(data); err != nil {
-		return fmt.Errorf("Failed to write data: %w", err)
+		return fmt.Errorf("failed to write data: %w", err)
 	}
 	return nil
 }
