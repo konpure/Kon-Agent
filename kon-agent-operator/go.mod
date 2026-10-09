@@ -1,4 +1,4 @@
-module github.com/konpure/Kon-Agent
+module github.com/konpure/kon-agent-operator
 
 go 1.19
 

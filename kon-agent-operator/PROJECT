@@ -18,6 +18,6 @@ resources:
   domain: konpure.com
   group: core
   kind: KonAgent
-  path: github.com/konpure/Kon-Agent/api/v1alpha1
+  path: github.com/konpure/kon-agent-operator/api/v1alpha1
   version: v1alpha1
 version: "3"

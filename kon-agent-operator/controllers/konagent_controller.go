@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/konpure/Kon-Agent/api/v1alpha1"
+	corev1alpha1 "github.com/konpure/kon-agent-operator/api/v1alpha1"
 )
 
 // KonAgentReconciler reconciles a KonAgent object

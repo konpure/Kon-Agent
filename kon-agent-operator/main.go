@@ -31,8 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	corev1alpha1 "github.com/konpure/Kon-Agent/api/v1alpha1"
-	"github.com/konpure/Kon-Agent/controllers"
+	corev1alpha1 "github.com/konpure/kon-agent-operator/api/v1alpha1"
+	"github.com/konpure/kon-agent-operator/controllers"
 	//+kubebuilder:scaffold:imports
 )
 
