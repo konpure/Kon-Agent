@@ -10,7 +10,7 @@ import (
 
 type Config struct {
 	Server   string                         `yaml:"server"`
-	ClientId string                         `yaml:"client_id"`
+	ClientId string                         `yaml:"client-id"`
 	Plugins  map[string]plugin.PluginConfig `yaml:"plugins"`
 	Cache    struct {
 		Path    string `yaml:"path"`

@@ -15,6 +15,18 @@ import (
 	"time"
 )
 
+// rttBoundsSeconds mirrors the bucket boundaries in network_monitor.c.
+// Keep the two in sync: the kernel only stores bucket indexes, the bounds
+// themselves live here (single source of truth on the wire).
+var rttBoundsSeconds = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5}
+
+// rtt_stats map layout (see network_monitor.c).
+const (
+	rttBucketOverflow = 10
+	rttKeyCount       = 100
+	rttKeySum         = 101
+)
+
 type Tracer struct {
 	config        plugin.PluginConfig
 	stop          chan struct{}
@@ -25,7 +37,9 @@ type Tracer struct {
 type collector struct {
 	obj      *ebpf.Collection
 	pktCount *ebpf.Map
+	rttStats *ebpf.Map
 	xdpLink  link.Link
+	kpLink   link.Link
 }
 
 func New(config plugin.PluginConfig) plugin.Plugin {
@@ -68,23 +82,8 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 	for {
 		select {
 		case <-ticker.C:
-			slog.Info("Reading packet delta")
-			count, err := t.readPacketDelta()
-			if err != nil {
-				slog.Error("Failed to read packet delta", "err", err)
-				continue
-			}
-			slog.Info("Successfully read packet delta", "count", count)
-
-			out <- plugin.Event{
-				Name:   "network_packets_total",
-				Time:   time.Now().UnixNano(),
-				Labels: map[string]string{"interface": t.getDefaultInterfaceName()},
-				Values: float64(count),
-				Scope:  "ebpf",
-				Kind:   plugin.KindSumDelta,
-			}
-			slog.Info("Successfully sent packet count event")
+			t.emitPacketDeltas(out)
+			t.emitRTTHistogram(out)
 		case <-ctx.Done():
 			slog.Info("eBPF plugin stopped")
 			return nil
@@ -93,6 +92,48 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 			return nil
 		}
 	}
+}
+
+// emitPacketDeltas drains the per-interface counters (read-then-clear) and
+// emits one Sum-delta event per interface.
+func (t *Tracer) emitPacketDeltas(out chan<- plugin.Event) {
+	deltas, err := t.readPacketDeltas()
+	if err != nil {
+		slog.Error("Failed to read packet deltas", "err", err)
+		return
+	}
+	for ifindex, count := range deltas {
+		out <- plugin.Event{
+			Name:   "network_packets_total",
+			Time:   time.Now().UnixNano(),
+			Labels: map[string]string{"interface": interfaceName(ifindex)},
+			Values: float64(count),
+			Scope:  "ebpf",
+			Kind:   plugin.KindSumDelta,
+		}
+	}
+}
+
+// emitRTTHistogram drains the RTT histogram (read-then-clear) and emits one
+// Histogram event. RTT is host-wide (kprobe), so it carries no interface label.
+func (t *Tracer) emitRTTHistogram(out chan<- plugin.Event) {
+	hist, err := t.readRTTHistogram()
+	if err != nil {
+		slog.Error("Failed to read RTT histogram", "err", err)
+		return
+	}
+	if hist == nil || hist.Count == 0 {
+		return
+	}
+	out <- plugin.Event{
+		Name:      "tcp_rtt_seconds",
+		Time:      time.Now().UnixNano(),
+		Labels:    map[string]string{},
+		Scope:     "ebpf",
+		Kind:      plugin.KindHistogram,
+		Histogram: hist,
+	}
+	slog.Debug("Emitted RTT histogram", "count", hist.Count, "avg_ms", hist.Sum/float64(hist.Count)*1000)
 }
 
 func (t *Tracer) getDefaultInterfaceName() string {
@@ -138,6 +179,12 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("failed to find pkt_count map")
 	}
 
+	rttStats := coll.Maps["rtt_stats"]
+	if rttStats == nil {
+		coll.Close()
+		return fmt.Errorf("failed to find rtt_stats map")
+	}
+
 	interfaceName, err := getDefaultInterface()
 	t.interfaceName = interfaceName
 	if err != nil {
@@ -163,10 +210,20 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("failed to attach XDP program: %w", err)
 	}
 
+	slog.Info("Attaching kprobe", "symbol", "tcp_rcv_established")
+	kpLink, err := link.Kprobe("tcp_rcv_established", coll.Programs["tcp_rtt"], nil)
+	if err != nil {
+		_ = xdpLink.Close()
+		coll.Close()
+		return fmt.Errorf("failed to attach kprobe: %w", err)
+	}
+
 	t.collector = &collector{
 		obj:      coll,
-		pktCount: coll.Maps["pkt_count"],
+		pktCount: pktCount,
+		rttStats: rttStats,
 		xdpLink:  xdpLink,
+		kpLink:   kpLink,
 	}
 	slog.Info("eBPF collector initialized successfully")
 	return nil
@@ -174,8 +231,11 @@ func (t *Tracer) initCollector() error {
 
 func (t *Tracer) closeCollector() {
 	if t.collector != nil {
+		if t.collector.kpLink != nil {
+			_ = t.collector.kpLink.Close()
+		}
 		if t.collector.xdpLink != nil {
-			t.collector.xdpLink.Close()
+			_ = t.collector.xdpLink.Close()
 		}
 		if t.collector.obj != nil {
 			t.collector.obj.Close()
@@ -184,11 +244,54 @@ func (t *Tracer) closeCollector() {
 	}
 }
 
-// readPacketDelta reads the packet counter and clears the kernel map entry
-// (read-then-clear), so each reported value is the delta of the last
-// collection window — matching Sum{temporality: DELTA} semantics.
-func (t *Tracer) readPacketDelta() (uint64, error) {
-	var result uint64
+// readPacketDeltas drains the per-ifindex packet counters (read-then-clear),
+// so each reported value is the delta of the last collection window.
+func (t *Tracer) readPacketDeltas() (map[uint32]uint64, error) {
+	result := make(map[uint32]uint64)
+	err := t.drainMap(t.collectorPktCount(), func(key uint32, value uint64) {
+		result[key] = value
+	})
+	return result, err
+}
+
+// readRTTHistogram drains the RTT bucket counters (read-then-clear) and
+// builds the aggregated histogram. Returns nil when no samples arrived in
+// this window.
+func (t *Tracer) readRTTHistogram() (*plugin.HistogramData, error) {
+	buckets := make([]uint64, len(rttBoundsSeconds)+1)
+	var count, sumUS uint64
+
+	err := t.drainMap(t.collectorRTTStats(), func(key uint32, value uint64) {
+		switch {
+		case key <= rttBucketOverflow:
+			buckets[key] = value
+		case key == rttKeyCount:
+			count = value
+		case key == rttKeySum:
+			sumUS = value
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, nil
+	}
+
+	return &plugin.HistogramData{
+		Count:          count,
+		Sum:            float64(sumUS) / 1e6, // microseconds -> seconds
+		BucketCounts:   buckets,
+		ExplicitBounds: rttBoundsSeconds,
+	}, nil
+}
+
+// drainMap collects a map's keys, then LookupAndDelete's each of them
+// (two phases to avoid mutating the map during iteration).
+func (t *Tracer) drainMap(m *ebpf.Map, fn func(key uint32, value uint64)) error {
+	if m == nil {
+		return fmt.Errorf("collector not initialized")
+	}
 	var resultErr error
 
 	func() {
@@ -198,28 +301,55 @@ func (t *Tracer) readPacketDelta() (uint64, error) {
 				resultErr = fmt.Errorf("recovered from panic: %v", r)
 			}
 		}()
-		if t.collector == nil {
-			resultErr = fmt.Errorf("collector not initialized")
+
+		var key uint32
+		var value uint64
+		var keys []uint32
+		iter := m.Iterate()
+		for iter.Next(&key, &value) {
+			keys = append(keys, key)
+		}
+		if err := iter.Err(); err != nil {
+			resultErr = fmt.Errorf("failed to iterate map: %w", err)
 			return
 		}
 
-		var key uint32 = 0
-		var value uint64
-
-		if err := t.collector.pktCount.LookupAndDelete(&key, &value); err != nil {
-			if errors.Is(err, ebpf.ErrKeyNotExist) {
-				// No packets arrived in this window.
-				result = 0
+		for _, k := range keys {
+			var v uint64
+			if err := m.LookupAndDelete(&k, &v); err != nil {
+				if errors.Is(err, ebpf.ErrKeyNotExist) {
+					continue
+				}
+				resultErr = fmt.Errorf("failed to lookup and delete: %w", err)
 				return
 			}
-			resultErr = fmt.Errorf("failed to lookup and delete packet count: %w", err)
-			return
+			fn(k, v)
 		}
-
-		result = value
 	}()
 
-	return result, resultErr
+	return resultErr
+}
+
+func (t *Tracer) collectorPktCount() *ebpf.Map {
+	if t.collector == nil {
+		return nil
+	}
+	return t.collector.pktCount
+}
+
+func (t *Tracer) collectorRTTStats() *ebpf.Map {
+	if t.collector == nil {
+		return nil
+	}
+	return t.collector.rttStats
+}
+
+// interfaceName resolves an ifindex to its name, falling back to "if<N>".
+func interfaceName(ifindex uint32) string {
+	if iface, err := net.InterfaceByIndex(int(ifindex)); err == nil {
+		return iface.Name
+	}
+	return fmt.Sprintf("if%d", ifindex)
 }
 
 // Get default interface name

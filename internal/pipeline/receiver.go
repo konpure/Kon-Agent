@@ -29,6 +29,7 @@ var metricUnits = map[string]string{
 	"disk_io_read_count_delta":  "{io}",
 	"disk_io_write_count_delta": "{io}",
 	"network_packets_total":     "{packet}",
+	"tcp_rtt_seconds":           "s",
 }
 
 // Receiver is the pipeline's source stage. It owns the plugin event channel
@@ -85,10 +86,33 @@ func EventToMetric(e plugin.Event) *protocol.Metric {
 			Temporality: protocol.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
 			IsMonotonic: true,
 		}}
+	case plugin.KindHistogram:
+		m.Data = histogramData(e)
 	default:
 		m.Data = &protocol.Metric_Gauge{Gauge: &protocol.Gauge{
 			DataPoints: []*protocol.NumberDataPoint{dp},
 		}}
 	}
 	return m
+}
+
+// histogramData builds the protocol Histogram from a plugin histogram event.
+// Temporality is delta: producers (e.g. the eBPF plugin) read-and-clear the
+// kernel maps every period. min/max stay unset — they are not recoverable
+// from aggregated bucket counters, and OTLP marks them optional.
+func histogramData(e plugin.Event) *protocol.Metric_Histogram {
+	hp := &protocol.HistogramDataPoint{
+		Attributes:   e.Labels,
+		TimeUnixNano: e.Time,
+	}
+	if h := e.Histogram; h != nil {
+		hp.Count = h.Count
+		hp.Sum = h.Sum
+		hp.BucketCounts = h.BucketCounts
+		hp.ExplicitBounds = h.ExplicitBounds
+	}
+	return &protocol.Metric_Histogram{Histogram: &protocol.Histogram{
+		DataPoints:  []*protocol.HistogramDataPoint{hp},
+		Temporality: protocol.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
+	}}
 }

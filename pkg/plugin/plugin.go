@@ -16,6 +16,16 @@ const (
 	KindHistogram
 )
 
+// HistogramData carries an aggregated histogram (bucket counts instead of
+// raw samples — Monarch distribution / OTLP Histogram: constant space and
+// cross-instance aggregability).
+type HistogramData struct {
+	Count          uint64
+	Sum            float64
+	BucketCounts   []uint64
+	ExplicitBounds []float64
+}
+
 type Event struct {
 	Name   string
 	Time   int64
@@ -24,6 +34,8 @@ type Event struct {
 	// Scope is the OTLP InstrumentationScope name, i.e. the plugin name.
 	Scope string
 	Kind  MetricKind
+	// Histogram is set when Kind == KindHistogram.
+	Histogram *HistogramData
 }
 
 type PluginFactory func(config PluginConfig) Plugin
