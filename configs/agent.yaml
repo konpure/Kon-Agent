@@ -1,5 +1,6 @@
 server: "quic://localhost:7843"
 client-id: "edge-agent-1"
+codec: gorilla
 plugins:
   cpu:
     enable: true

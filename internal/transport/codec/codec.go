@@ -14,6 +14,7 @@ package codec
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/golang/snappy"
 	"github.com/konpure/Kon-Agent/pkg/protocol"
@@ -36,6 +37,32 @@ const (
 	ModeSnappy
 	ModeGorilla
 )
+
+func (m Mode) String() string {
+	switch m {
+	case ModeSnappy:
+		return "snappy"
+	case ModeGorilla:
+		return "gorilla"
+	default:
+		return "raw"
+	}
+}
+
+// ParseMode maps a config string to a Mode. Empty defaults to gorilla (the
+// target encoding); raw/snappy exist for the comparison experiment.
+func ParseMode(s string) (Mode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "gorilla":
+		return ModeGorilla, nil
+	case "snappy":
+		return ModeSnappy, nil
+	case "raw":
+		return ModeRaw, nil
+	default:
+		return ModeGorilla, fmt.Errorf("codec: unknown mode %q", s)
+	}
+}
 
 // Encode produces a self-contained payload for the stateless modes.
 // ModeGorilla is stateful and requires a StreamEncoder.
