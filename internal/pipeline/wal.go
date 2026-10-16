@@ -14,11 +14,19 @@ import (
 // ack checkpoint only after a successful send. This is the Prometheus remote
 // write model: the WAL is the queue, backpressure accumulates on disk, and a
 // successful send is what moves the consume position forward.
+// pendingRecord is a WAL record that has been read but not yet acked.
+// The consumer holds it across retries so a failed export does not skip it.
+type pendingRecord struct {
+	payload []byte
+	next    wal.Checkpoint
+}
+
 type walConsumer struct {
 	w        *wal.WAL
 	exporter *Exporter
 	reader   *wal.Reader
 	cp       wal.Checkpoint
+	pending  *pendingRecord
 
 	notifyCh chan struct{}
 	stopCh   chan struct{}
@@ -87,39 +95,46 @@ func (c *walConsumer) stop() {
 
 func (c *walConsumer) drain(ctx context.Context) {
 	for {
-		_, payload, next, err := c.reader.Next()
-		if errors.Is(err, io.EOF) {
-			c.reportPressure()
-			return
-		}
-		var corrupt *wal.CorruptionError
-		if errors.As(err, &corrupt) {
-			slog.Error("WAL record corrupt, truncating at last good position", "error", err)
-			c.onError("wal_corruption")
-			if terr := c.w.Truncate(c.cp); terr != nil {
-				slog.Error("WAL truncate failed", "error", terr)
-				c.onError("wal_truncate_failed")
+		// Only read a new record when the previous one has been acked.
+		// This fixes a bug where a failed export silently skipped the record:
+		// the reader had already advanced past it.
+		if c.pending == nil {
+			_, payload, next, err := c.reader.Next()
+			if errors.Is(err, io.EOF) {
+				c.reportPressure()
 				return
 			}
-			c.reader.Reset(c.cp)
-			continue
-		}
-		if err != nil {
-			slog.Error("WAL read failed", "error", err)
-			c.onError("wal_read_failed")
-			return
+			var corrupt *wal.CorruptionError
+			if errors.As(err, &corrupt) {
+				slog.Error("WAL record corrupt, truncating at last good position", "error", err)
+				c.onError("wal_corruption")
+				if terr := c.w.Truncate(c.cp); terr != nil {
+					slog.Error("WAL truncate failed", "error", terr)
+					c.onError("wal_truncate_failed")
+					return
+				}
+				c.reader.Reset(c.cp)
+				continue
+			}
+			if err != nil {
+				slog.Error("WAL read failed", "error", err)
+				c.onError("wal_read_failed")
+				return
+			}
+			c.pending = &pendingRecord{payload: payload, next: next}
 		}
 
-		if err := c.exporter.ExportBytes(ctx, payload); err != nil {
+		if err := c.exporter.ExportBatch(ctx, c.pending.payload); err != nil {
 			slog.Warn("WAL replay export failed, backing off", "error", err, "backoff", c.backoff)
 			c.onError("export_failed")
 			if !c.sleep(ctx) {
 				return
 			}
-			continue // retry the same record; the checkpoint does not move
+			continue // retry the SAME record; the checkpoint does not move
 		}
 
-		c.cp = next
+		c.cp = c.pending.next
+		c.pending = nil
 		if err := wal.SaveCheckpoint(c.w.Dir(), c.cp); err != nil {
 			slog.Error("WAL checkpoint save failed", "error", err)
 			c.onError("wal_checkpoint_failed")
