@@ -14,11 +14,12 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"sync"
 	"time"
 
+	"github.com/konpure/Kon-Agent/internal/transport/codec"
 	"github.com/konpure/Kon-Agent/pkg/protocol"
 	"github.com/quic-go/quic-go"
-	"google.golang.org/protobuf/proto"
 )
 
 func main() {
@@ -119,6 +120,14 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	return tls.X509KeyPair(certPEM, privPEM)
 }
 
+// connState holds the per-connection stream decoder. The Gorilla codec keeps
+// per-series state scoped to the connection; both sides start empty on
+// (re)connect, so no out-of-band resync protocol is needed.
+type connState struct {
+	decoder *codec.StreamDecoder
+	mu      sync.Mutex
+}
+
 func handleConnection(conn interface{}) {
 	// 在quic-go v0.54.0中，listener.Accept() 返回 *quic.Conn 类型
 	quicConn, ok := conn.(*quic.Conn)
@@ -127,6 +136,8 @@ func handleConnection(conn interface{}) {
 		return
 	}
 	defer quicConn.CloseWithError(0, "")
+
+	state := &connState{decoder: codec.NewStreamDecoder()}
 
 	for {
 		// 接受新流 - 对于接收单向流，应该使用 AcceptUniStream
@@ -139,11 +150,11 @@ func handleConnection(conn interface{}) {
 		fmt.Printf("New unidirectional stream accepted: ID=%d\n", stream.StreamID())
 
 		// 处理单向流
-		go handleUniStream(stream)
+		go handleUniStream(stream, state)
 	}
 }
 
-func handleUniStream(stream *quic.ReceiveStream) {
+func handleUniStream(stream *quic.ReceiveStream, state *connState) {
 	// 在quic-go v0.54.0中，ReceiveStream可能没有Close方法
 	// 使用stream.CancelRead()来取消读取并释放资源
 	defer stream.CancelRead(0)
@@ -164,28 +175,32 @@ func handleUniStream(stream *quic.ReceiveStream) {
 			return
 		}
 
-		// 解析长度
+		// 解析长度（覆盖 flags + payload）
 		length := binary.BigEndian.Uint32(lengthBuf[:])
-		if length > 10*1024*1024 { // 限制最大10MB
+		if length > 10*1024*1024 || length < 1 { // 限制最大10MB
 			log.Printf("Data too large from stream %d: %d bytes", stream.StreamID(), length)
 			return
 		}
 
-		// 读取实际数据
-		data := make([]byte, length)
-		_, err = io.ReadFull(reader, data)
+		// 读取帧体：首字节为编码标志位
+		frame := make([]byte, length)
+		_, err = io.ReadFull(reader, frame)
 		if err != nil {
 			log.Printf("Failed to read data from stream %d: %v", stream.StreamID(), err)
 			return
 		}
+		flags := frame[0]
+		payload := frame[1:]
 
-		// 解析Protobuf数据（协议 v2）
-		var req protocol.ExportMetricsRequest
-		if err := proto.Unmarshal(data, &req); err != nil {
-			log.Printf("Failed to unmarshal ExportMetricsRequest from stream %d: %v", stream.StreamID(), err)
+		// 按 flags 解码；Gorilla 帧需要连接级解码器状态
+		state.mu.Lock()
+		req, err := state.decoder.Decode(flags, payload)
+		state.mu.Unlock()
+		if err != nil {
+			log.Printf("Failed to decode frame (flags=%d) from stream %d: %v", flags, stream.StreamID(), err)
 			continue
 		}
-		printExportRequest(stream.StreamID(), &req)
+		printExportRequest(stream.StreamID(), req)
 	}
 }
 
