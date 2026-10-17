@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/konpure/Kon-Agent/internal/transport/codec"
 	"github.com/konpure/Kon-Agent/internal/transport/quic"
 	"github.com/konpure/Kon-Agent/internal/wal"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
@@ -23,6 +24,8 @@ type Config struct {
 	FlushInterval time.Duration
 	// MaxRetries bounds exporter retries per batch.
 	MaxRetries int
+	// CodecMode selects the wire encoding (raw/snappy/gorilla).
+	CodecMode codec.Mode
 
 	// WAL, when set, makes the pipeline write-through: every batch is
 	// persisted before sending, and a consumer goroutine replays the log.
@@ -67,7 +70,7 @@ func New(cfg Config, events <-chan plugin.Event, client *quic.Client) *Pipeline 
 		receiver:   NewReceiver(events),
 		batcher:    NewBatchProcessor(cfg.MaxBatchSize, cfg.MaxPending),
 		processors: []Processor{NewSamplingProcessor()},
-		exporter:   NewExporter(client, cfg.MaxRetries),
+		exporter:   NewExporter(client, cfg.MaxRetries, cfg.CodecMode),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
 	}
@@ -175,7 +178,7 @@ func (p *Pipeline) emit(ctx context.Context, batch []*Item) {
 	}
 
 	// Fallback without WAL: direct export, requeue on failure.
-	if err := p.exporter.ExportBytes(ctx, payload); err != nil {
+	if err := p.exporter.ExportBatch(ctx, payload); err != nil {
 		slog.Error("Failed to export batch", "error", err)
 		p.onError("export_failed")
 		p.batcher.Requeue(batch)

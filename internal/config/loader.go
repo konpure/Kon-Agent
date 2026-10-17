@@ -11,6 +11,7 @@ import (
 type Config struct {
 	Server   string                         `yaml:"server"`
 	ClientId string                         `yaml:"client-id"`
+	Codec    string                         `yaml:"codec"`
 	Plugins  map[string]plugin.PluginConfig `yaml:"plugins"`
 	Cache    struct {
 		Path    string `yaml:"path"`

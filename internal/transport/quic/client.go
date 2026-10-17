@@ -3,36 +3,45 @@ package quic
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
-	"github.com/konpure/Kon-Agent/pkg/protocol"
-	"github.com/quic-go/quic-go"
-	"google.golang.org/protobuf/proto"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/konpure/Kon-Agent/pkg/protocol"
+	"github.com/quic-go/quic-go"
+	"google.golang.org/protobuf/proto"
 )
 
+// Client ships frames over a single persistent uni-directional stream.
+//
+// Why one stream instead of a pool: the Gorilla-style codec keeps per-series
+// state scoped to a connection, so frames must arrive in send order. QUIC
+// makes no ordering guarantee across streams, but a single stream is an
+// ordered byte pipe — the decoder on the other end can safely apply frames
+// to its mirror state.
 type Client struct {
 	serverAddr string
+	agentID    string
 	tlsConfig  *tls.Config
 	quicConfig *quic.Config
-	conn       *quic.Conn
-	mutex      sync.Mutex
 
-	// Connection Pool
-	streamPool      chan *quic.SendStream
-	maxPoolSize     int
-	streamTimeout   time.Duration
-	poolInitialized bool
+	mutex      sync.Mutex
+	conn       *quic.Conn
+	dataStream *quic.SendStream
 }
 
-func NewClient(serverAddr string) *Client {
-	maxPoolSize := 10
-	streamTimeout := 10 * time.Second
-
+func NewClient(serverAddr string, agentID ...string) *Client {
+	id := ""
+	if len(agentID) > 0 {
+		id = agentID[0]
+	}
 	return &Client{
 		serverAddr: serverAddr,
+		agentID:    id,
 		tlsConfig: &tls.Config{
 			InsecureSkipVerify: true, // For development only
 			NextProtos:         []string{protocol.ALPN()},
@@ -40,97 +49,14 @@ func NewClient(serverAddr string) *Client {
 		quicConfig: &quic.Config{
 			KeepAlivePeriod: 10 * time.Second,
 		},
-		maxPoolSize:   maxPoolSize,
-		streamTimeout: streamTimeout,
-		streamPool:    make(chan *quic.SendStream, maxPoolSize),
 	}
-}
-
-func (c *Client) initStreamPool() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	if c.poolInitialized || c.conn == nil {
-		return
-	}
-
-	c.poolInitialized = true
-
-	go func() {
-		ticker := time.NewTicker(c.streamTimeout / 2)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				// TODO: Check if stream is still active
-				c.mutex.Lock()
-				conn := c.conn
-				c.mutex.Unlock()
-
-				if conn == nil {
-					break
-				}
-
-				tempPool := make([]*quic.SendStream, 0)
-				poolSize := len(c.streamPool)
-
-				// Check if stream is still active
-				for i := 0; i < poolSize; i++ {
-					stream := <-c.streamPool
-					if stream != nil && stream.Context().Err() == nil {
-						tempPool = append(tempPool, stream)
-					} else if stream != nil {
-						_ = stream.Close()
-					}
-				}
-
-				for _, stream := range tempPool {
-					select {
-					case c.streamPool <- stream:
-						// stream has been returned to pool
-					default:
-						// stream is not returned to pool, close it
-						_ = stream.Close()
-					}
-				}
-			}
-		}
-	}()
-}
-
-func (c *Client) getStream(ctx context.Context) (*quic.SendStream, error) {
-	select {
-	case stream := <-c.streamPool:
-		if stream.Context().Err() == nil {
-			return stream, nil
-		}
-		return c.createNewStream(ctx)
-	default:
-		return c.createNewStream(ctx)
-	}
-}
-
-func (c *Client) createNewStream(ctx context.Context) (*quic.SendStream, error) {
-	c.mutex.Lock()
-	conn := c.conn
-	c.mutex.Unlock()
-
-	if conn == nil {
-		return nil, fmt.Errorf("not connected to QUIC server")
-	}
-	return conn.OpenUniStreamSync(ctx)
 }
 
 func (c *Client) Connect(ctx context.Context) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	// Remove "quic://" prefix if present
-	serverAddr := c.serverAddr
-	if strings.HasPrefix(serverAddr, "quic://") {
-		serverAddr = strings.TrimPrefix(serverAddr, "quic://")
-	}
+	serverAddr := strings.TrimPrefix(c.serverAddr, "quic://")
 
 	slog.Info("Connecting to QUIC server", "addr", serverAddr)
 
@@ -140,80 +66,160 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	c.conn = conn
+	// Fresh connection: no data stream yet, and the codec state on both
+	// sides starts empty (the exporter resets its encoder on reconnect).
+	c.dataStream = nil
+
+	// Version negotiation: the first frame on a new connection is a
+	// handshake over a bidirectional stream (Remote Write style).
+	if err := c.handshakeLocked(ctx, conn); err != nil {
+		_ = conn.CloseWithError(0, "handshake failed")
+		c.conn = nil
+		return fmt.Errorf("handshake failed: %w", err)
+	}
+
 	slog.Info("Connected to QUIC server successfully", "addr", serverAddr)
-
-	// Initialize stream pool
-	go c.initStreamPool()
-
 	return nil
 }
 
-// SendBatchMetrics marshals the request and ships it via SendRaw.
+// handshakeLocked exchanges protocol versions on a bidirectional stream.
+// Frame format: [length:4][proto.Marshal(HandshakeRequest/Response)].
+// The caller must hold c.mutex.
+func (c *Client) handshakeLocked(ctx context.Context, conn *quic.Conn) error {
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open handshake stream: %w", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	req := &protocol.HandshakeRequest{
+		ProtocolVersion: protocol.ProtocolVersion,
+		AgentId:         c.agentID,
+	}
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal handshake: %w", err)
+	}
+
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+	copy(frame[4:], data)
+
+	if _, err := stream.Write(frame); err != nil {
+		return fmt.Errorf("failed to send handshake: %w", err)
+	}
+
+	// Read the response with a deadline so a broken server cannot hang us.
+	_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var lengthBuf [4]byte
+	if _, err := io.ReadFull(stream, lengthBuf[:]); err != nil {
+		return fmt.Errorf("failed to read handshake response length: %w", err)
+	}
+	length := binary.BigEndian.Uint32(lengthBuf[:])
+	if length > 4096 {
+		return fmt.Errorf("handshake response too large: %d", length)
+	}
+	respData := make([]byte, length)
+	if _, err := io.ReadFull(stream, respData); err != nil {
+		return fmt.Errorf("failed to read handshake response: %w", err)
+	}
+
+	var resp protocol.HandshakeResponse
+	if err := proto.Unmarshal(respData, &resp); err != nil {
+		return fmt.Errorf("failed to unmarshal handshake response: %w", err)
+	}
+	if !resp.GetAccepted() {
+		return fmt.Errorf("server rejected protocol %q (supports %v): %s",
+			protocol.ProtocolVersion, resp.GetSupportedVersions(), resp.GetMessage())
+	}
+	slog.Info("Protocol handshake accepted",
+		"client_version", protocol.ProtocolVersion,
+		"server_version", resp.GetServerVersion())
+	return nil
+}
+
+// SendBatchMetrics marshals the request and ships it as a raw-proto frame.
 func (c *Client) SendBatchMetrics(ctx context.Context, req *protocol.ExportMetricsRequest) error {
 	data, err := proto.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal batch metrics: %w", err)
 	}
-	return c.SendRaw(ctx, data)
+	return c.SendRaw(ctx, 0, data)
 }
 
-// SendRaw ships pre-marshaled bytes (length-prefixed) over a pooled stream.
-// The WAL consumer uses it to replay records without re-marshaling, so the
-// bytes on the wire are exactly the bytes that were persisted.
-func (c *Client) SendRaw(ctx context.Context, data []byte) error {
+// SendRaw ships one frame over the persistent data stream.
+// Wire format: [length:4][flags:1][payload]; length covers flags+payload.
+//
+// On write failure the stream may hold a partial frame, which corrupts the
+// ordered byte pipe — the caller (exporter) is expected to close the
+// connection so both sides reset their codec state.
+func (c *Client) SendRaw(ctx context.Context, flags uint8, data []byte) error {
+	stream, err := c.getDataStream(ctx)
+	if err != nil {
+		return err
+	}
+
+	frame := make([]byte, 5+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)+1))
+	frame[4] = flags
+	copy(frame[5:], data)
+
+	if _, err := stream.Write(frame); err != nil {
+		c.dropDataStream()
+		return fmt.Errorf("failed to write frame: %w", err)
+	}
+	return nil
+}
+
+// getDataStream returns the live data stream, opening one if needed.
+func (c *Client) getDataStream(ctx context.Context) (*quic.SendStream, error) {
 	c.mutex.Lock()
 	conn := c.conn
+	stream := c.dataStream
 	c.mutex.Unlock()
 
 	if conn == nil {
-		return fmt.Errorf("not connected to QUIC server")
+		return nil, fmt.Errorf("not connected to QUIC server")
+	}
+	if stream != nil && stream.Context().Err() == nil {
+		return stream, nil
 	}
 
-	stream, err := c.getStream(ctx)
+	newStream, err := conn.OpenUniStreamSync(ctx)
 	if err != nil {
 		if isConnectionClosed(err) {
 			c.mutex.Lock()
 			c.conn = nil
+			c.dataStream = nil
 			c.mutex.Unlock()
 		}
-		return fmt.Errorf("failed to open stream: %w", err)
+		return nil, fmt.Errorf("failed to open stream: %w", err)
 	}
 
-	defer func() {
-		if stream.Context().Err() == nil {
-			select {
-			case c.streamPool <- stream:
-				// stream has been returned to pool
-			default:
-				// stream is not returned to pool, close it
-				_ = stream.Close()
-			}
-		} else {
-			_ = stream.Close()
-		}
-	}()
+	c.mutex.Lock()
+	c.dataStream = newStream
+	c.mutex.Unlock()
+	return newStream, nil
+}
 
-	length := uint32(len(data))
-	lengthBuf := make([]byte, 4)
-	lengthBuf[0] = byte(length >> 24)
-	lengthBuf[1] = byte(length >> 16)
-	lengthBuf[2] = byte(length >> 8)
-	lengthBuf[3] = byte(length)
-
-	if _, err := stream.Write(lengthBuf); err != nil {
-		return fmt.Errorf("failed to write length: %w", err)
+// dropDataStream discards the current stream after a write failure.
+func (c *Client) dropDataStream() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.dataStream != nil {
+		_ = c.dataStream.Close()
+		c.dataStream = nil
 	}
-
-	if _, err := stream.Write(data); err != nil {
-		return fmt.Errorf("failed to write data: %w", err)
-	}
-	return nil
 }
 
 func (c *Client) Close() error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	if c.dataStream != nil {
+		_ = c.dataStream.Close()
+		c.dataStream = nil
+	}
 	if c.conn != nil {
 		err := c.conn.CloseWithError(0, "client closing")
 		c.conn = nil

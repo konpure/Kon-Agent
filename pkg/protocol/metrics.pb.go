@@ -809,6 +809,131 @@ func (x *HistogramDataPoint) GetMax() float64 {
 	return 0
 }
 
+// Handshake is the first frame exchanged on a new QUIC connection
+// (bidirectional stream, before any data stream). It follows Prometheus
+// Remote Write's semantic version negotiation: additive fields are minor
+// (compatible), removing fields is major (reject).
+type HandshakeRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ProtocolVersion string                 `protobuf:"bytes,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	AgentId         string                 `protobuf:"bytes,2,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *HandshakeRequest) Reset() {
+	*x = HandshakeRequest{}
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HandshakeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HandshakeRequest) ProtoMessage() {}
+
+func (x *HandshakeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HandshakeRequest.ProtoReflect.Descriptor instead.
+func (*HandshakeRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_metrics_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *HandshakeRequest) GetProtocolVersion() string {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return ""
+}
+
+func (x *HandshakeRequest) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
+	}
+	return ""
+}
+
+type HandshakeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	ServerVersion string                 `protobuf:"bytes,2,opt,name=server_version,json=serverVersion,proto3" json:"server_version,omitempty"`
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	// Versions the server supports, for client-side diagnostics.
+	SupportedVersions []string `protobuf:"bytes,4,rep,name=supported_versions,json=supportedVersions,proto3" json:"supported_versions,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *HandshakeResponse) Reset() {
+	*x = HandshakeResponse{}
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HandshakeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HandshakeResponse) ProtoMessage() {}
+
+func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_metrics_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HandshakeResponse.ProtoReflect.Descriptor instead.
+func (*HandshakeResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_metrics_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *HandshakeResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *HandshakeResponse) GetServerVersion() string {
+	if x != nil {
+		return x.ServerVersion
+	}
+	return ""
+}
+
+func (x *HandshakeResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *HandshakeResponse) GetSupportedVersions() []string {
+	if x != nil {
+		return x.SupportedVersions
+	}
+	return nil
+}
+
 var File_pkg_protocol_metrics_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_metrics_proto_rawDesc = "" +
@@ -879,7 +1004,15 @@ const file_pkg_protocol_metrics_proto_rawDesc = "" +
 	"\x03max\x18\b \x01(\x01R\x03max\x1a=\n" +
 	"\x0fAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x8c\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"X\n" +
+	"\x10HandshakeRequest\x12)\n" +
+	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x19\n" +
+	"\bagent_id\x18\x02 \x01(\tR\aagentId\"\x9f\x01\n" +
+	"\x11HandshakeResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12%\n" +
+	"\x0eserver_version\x18\x02 \x01(\tR\rserverVersion\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x12-\n" +
+	"\x12supported_versions\x18\x04 \x03(\tR\x11supportedVersions*\x8c\x01\n" +
 	"\x16AggregationTemporality\x12'\n" +
 	"#AGGREGATION_TEMPORALITY_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dAGGREGATION_TEMPORALITY_DELTA\x10\x01\x12&\n" +
@@ -900,7 +1033,7 @@ func file_pkg_protocol_metrics_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_protocol_metrics_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_pkg_protocol_metrics_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_pkg_protocol_metrics_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_pkg_protocol_metrics_proto_goTypes = []any{
 	(AggregationTemporality)(0),   // 0: protocol.AggregationTemporality
 	(*ExportMetricsRequest)(nil),  // 1: protocol.ExportMetricsRequest
@@ -914,14 +1047,16 @@ var file_pkg_protocol_metrics_proto_goTypes = []any{
 	(*Histogram)(nil),             // 9: protocol.Histogram
 	(*NumberDataPoint)(nil),       // 10: protocol.NumberDataPoint
 	(*HistogramDataPoint)(nil),    // 11: protocol.HistogramDataPoint
-	nil,                           // 12: protocol.Resource.AttributesEntry
-	nil,                           // 13: protocol.NumberDataPoint.AttributesEntry
-	nil,                           // 14: protocol.HistogramDataPoint.AttributesEntry
+	(*HandshakeRequest)(nil),      // 12: protocol.HandshakeRequest
+	(*HandshakeResponse)(nil),     // 13: protocol.HandshakeResponse
+	nil,                           // 14: protocol.Resource.AttributesEntry
+	nil,                           // 15: protocol.NumberDataPoint.AttributesEntry
+	nil,                           // 16: protocol.HistogramDataPoint.AttributesEntry
 }
 var file_pkg_protocol_metrics_proto_depIdxs = []int32{
 	3,  // 0: protocol.ExportMetricsRequest.resource:type_name -> protocol.Resource
 	5,  // 1: protocol.ExportMetricsRequest.scope_metrics:type_name -> protocol.ScopeMetrics
-	12, // 2: protocol.Resource.attributes:type_name -> protocol.Resource.AttributesEntry
+	14, // 2: protocol.Resource.attributes:type_name -> protocol.Resource.AttributesEntry
 	4,  // 3: protocol.ScopeMetrics.scope:type_name -> protocol.InstrumentationScope
 	6,  // 4: protocol.ScopeMetrics.metrics:type_name -> protocol.Metric
 	7,  // 5: protocol.Metric.gauge:type_name -> protocol.Gauge
@@ -932,8 +1067,8 @@ var file_pkg_protocol_metrics_proto_depIdxs = []int32{
 	0,  // 10: protocol.Sum.temporality:type_name -> protocol.AggregationTemporality
 	11, // 11: protocol.Histogram.data_points:type_name -> protocol.HistogramDataPoint
 	0,  // 12: protocol.Histogram.temporality:type_name -> protocol.AggregationTemporality
-	13, // 13: protocol.NumberDataPoint.attributes:type_name -> protocol.NumberDataPoint.AttributesEntry
-	14, // 14: protocol.HistogramDataPoint.attributes:type_name -> protocol.HistogramDataPoint.AttributesEntry
+	15, // 13: protocol.NumberDataPoint.attributes:type_name -> protocol.NumberDataPoint.AttributesEntry
+	16, // 14: protocol.HistogramDataPoint.attributes:type_name -> protocol.HistogramDataPoint.AttributesEntry
 	1,  // 15: protocol.MetricsService.SendBatchMetrics:input_type -> protocol.ExportMetricsRequest
 	2,  // 16: protocol.MetricsService.SendBatchMetrics:output_type -> protocol.ExportMetricsResponse
 	16, // [16:17] is the sub-list for method output_type
@@ -959,7 +1094,7 @@ func file_pkg_protocol_metrics_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_metrics_proto_rawDesc), len(file_pkg_protocol_metrics_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

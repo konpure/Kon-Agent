@@ -6,6 +6,7 @@ import (
 	"github.com/konpure/Kon-Agent/internal/pipeline"
 	"github.com/konpure/Kon-Agent/internal/plugin"
 	"github.com/konpure/Kon-Agent/internal/security"
+	"github.com/konpure/Kon-Agent/internal/transport/codec"
 	"github.com/konpure/Kon-Agent/internal/transport/quic"
 	"github.com/konpure/Kon-Agent/internal/wal"
 	"log/slog"
@@ -26,7 +27,7 @@ type Core struct {
 
 func New(cfg *config.Config) *Core {
 	pluginManager := plugin.NewManager(cfg)
-	client := quic.NewClient(cfg.Server)
+	client := quic.NewClient(cfg.Server, cfg.ClientId)
 
 	// Init ResourceManager
 	resourceManager := NewResourceManager(10*time.Second, 80.0)
@@ -113,6 +114,13 @@ func (c *Core) Run() error {
 		}
 	}
 
+	// Parse the wire codec mode (gorilla/snappy/raw).
+	codecMode, err := codec.ParseMode(c.cfg.Codec)
+	if err != nil {
+		slog.Warn("Unknown codec mode, falling back to gorilla", "mode", c.cfg.Codec, "err", err)
+	}
+	slog.Info("Wire codec mode", "mode", codecMode)
+
 	// Build the explicit pipeline: receiver -> [batch] -> [sampling] -> [WAL] -> exporter.
 	pipe := pipeline.New(pipeline.Config{
 		AgentID:       c.cfg.ClientId,
@@ -120,6 +128,7 @@ func (c *Core) Run() error {
 		MaxPending:    1024,
 		FlushInterval: 5 * time.Second,
 		MaxRetries:    3,
+		CodecMode:     codecMode,
 		WAL:           walInstance,
 		OnExported: func(count int) {
 			c.StateManager.IncrementMetricSent()
