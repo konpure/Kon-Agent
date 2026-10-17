@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 // to its mirror state.
 type Client struct {
 	serverAddr string
+	agentID    string
 	tlsConfig  *tls.Config
 	quicConfig *quic.Config
 
@@ -32,9 +34,14 @@ type Client struct {
 	dataStream *quic.SendStream
 }
 
-func NewClient(serverAddr string) *Client {
+func NewClient(serverAddr string, agentID ...string) *Client {
+	id := ""
+	if len(agentID) > 0 {
+		id = agentID[0]
+	}
 	return &Client{
 		serverAddr: serverAddr,
+		agentID:    id,
 		tlsConfig: &tls.Config{
 			InsecureSkipVerify: true, // For development only
 			NextProtos:         []string{protocol.ALPN()},
@@ -62,7 +69,72 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Fresh connection: no data stream yet, and the codec state on both
 	// sides starts empty (the exporter resets its encoder on reconnect).
 	c.dataStream = nil
+
+	// Version negotiation: the first frame on a new connection is a
+	// handshake over a bidirectional stream (Remote Write style).
+	if err := c.handshakeLocked(ctx, conn); err != nil {
+		_ = conn.CloseWithError(0, "handshake failed")
+		c.conn = nil
+		return fmt.Errorf("handshake failed: %w", err)
+	}
+
 	slog.Info("Connected to QUIC server successfully", "addr", serverAddr)
+	return nil
+}
+
+// handshakeLocked exchanges protocol versions on a bidirectional stream.
+// Frame format: [length:4][proto.Marshal(HandshakeRequest/Response)].
+// The caller must hold c.mutex.
+func (c *Client) handshakeLocked(ctx context.Context, conn *quic.Conn) error {
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open handshake stream: %w", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	req := &protocol.HandshakeRequest{
+		ProtocolVersion: protocol.ProtocolVersion,
+		AgentId:         c.agentID,
+	}
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal handshake: %w", err)
+	}
+
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+	copy(frame[4:], data)
+
+	if _, err := stream.Write(frame); err != nil {
+		return fmt.Errorf("failed to send handshake: %w", err)
+	}
+
+	// Read the response with a deadline so a broken server cannot hang us.
+	_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var lengthBuf [4]byte
+	if _, err := io.ReadFull(stream, lengthBuf[:]); err != nil {
+		return fmt.Errorf("failed to read handshake response length: %w", err)
+	}
+	length := binary.BigEndian.Uint32(lengthBuf[:])
+	if length > 4096 {
+		return fmt.Errorf("handshake response too large: %d", length)
+	}
+	respData := make([]byte, length)
+	if _, err := io.ReadFull(stream, respData); err != nil {
+		return fmt.Errorf("failed to read handshake response: %w", err)
+	}
+
+	var resp protocol.HandshakeResponse
+	if err := proto.Unmarshal(respData, &resp); err != nil {
+		return fmt.Errorf("failed to unmarshal handshake response: %w", err)
+	}
+	if !resp.GetAccepted() {
+		return fmt.Errorf("server rejected protocol %q (supports %v): %s",
+			protocol.ProtocolVersion, resp.GetSupportedVersions(), resp.GetMessage())
+	}
+	slog.Info("Protocol handshake accepted",
+		"client_version", protocol.ProtocolVersion,
+		"server_version", resp.GetServerVersion())
 	return nil
 }
 

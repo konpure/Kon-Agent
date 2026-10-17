@@ -27,7 +27,7 @@ type Core struct {
 
 func New(cfg *config.Config) *Core {
 	pluginManager := plugin.NewManager(cfg)
-	client := quic.NewClient(cfg.Server)
+	client := quic.NewClient(cfg.Server, cfg.ClientId)
 
 	// Init ResourceManager
 	resourceManager := NewResourceManager(10*time.Second, 80.0)
