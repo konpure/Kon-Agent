@@ -20,6 +20,7 @@ import (
 	"github.com/konpure/Kon-Agent/internal/transport/codec"
 	"github.com/konpure/Kon-Agent/pkg/protocol"
 	"github.com/quic-go/quic-go"
+	"google.golang.org/protobuf/proto"
 )
 
 func main() {
@@ -128,6 +129,9 @@ type connState struct {
 	mu      sync.Mutex
 }
 
+// serverSupportedVersions lists the protocol versions this server accepts.
+var serverSupportedVersions = []string{protocol.ProtocolVersion}
+
 func handleConnection(conn interface{}) {
 	// 在quic-go v0.54.0中，listener.Accept() 返回 *quic.Conn 类型
 	quicConn, ok := conn.(*quic.Conn)
@@ -136,6 +140,12 @@ func handleConnection(conn interface{}) {
 		return
 	}
 	defer quicConn.CloseWithError(0, "")
+
+	// 第一条流是双向握手流：校验协议版本，不兼容则拒绝连接
+	if err := handleHandshake(quicConn); err != nil {
+		log.Printf("Handshake failed: %v", err)
+		return
+	}
 
 	state := &connState{decoder: codec.NewStreamDecoder()}
 
@@ -152,6 +162,73 @@ func handleConnection(conn interface{}) {
 		// 处理单向流
 		go handleUniStream(stream, state)
 	}
+}
+
+// handleHandshake reads the client's HandshakeRequest on a bidirectional
+// stream, validates the protocol version, and writes back a response.
+func handleHandshake(conn *quic.Conn) error {
+	stream, err := conn.AcceptStream(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to accept handshake stream: %w", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	_ = stream.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+	var lengthBuf [4]byte
+	if _, err := io.ReadFull(stream, lengthBuf[:]); err != nil {
+		return fmt.Errorf("failed to read handshake length: %w", err)
+	}
+	length := binary.BigEndian.Uint32(lengthBuf[:])
+	if length > 4096 {
+		return fmt.Errorf("handshake too large: %d", length)
+	}
+	data := make([]byte, length)
+	if _, err := io.ReadFull(stream, data); err != nil {
+		return fmt.Errorf("failed to read handshake: %w", err)
+	}
+
+	var req protocol.HandshakeRequest
+	if err := proto.Unmarshal(data, &req); err != nil {
+		return fmt.Errorf("failed to unmarshal handshake: %w", err)
+	}
+
+	fmt.Printf("Handshake: agent=%s, protocol=%s\n", req.GetAgentId(), req.GetProtocolVersion())
+
+	// 版本校验：当前只接受完全匹配
+	accepted := false
+	for _, v := range serverSupportedVersions {
+		if req.GetProtocolVersion() == v {
+			accepted = true
+			break
+		}
+	}
+
+	resp := &protocol.HandshakeResponse{
+		Accepted:          accepted,
+		ServerVersion:     protocol.ProtocolVersion,
+		SupportedVersions: serverSupportedVersions,
+	}
+	if !accepted {
+		resp.Message = fmt.Sprintf("unsupported protocol version %q", req.GetProtocolVersion())
+	}
+
+	respData, err := proto.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("failed to marshal handshake response: %w", err)
+	}
+	frame := make([]byte, 4+len(respData))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(respData)))
+	copy(frame[4:], respData)
+
+	if _, err := stream.Write(frame); err != nil {
+		return fmt.Errorf("failed to send handshake response: %w", err)
+	}
+
+	if !accepted {
+		return fmt.Errorf("rejected client protocol %q", req.GetProtocolVersion())
+	}
+	return nil
 }
 
 func handleUniStream(stream *quic.ReceiveStream, state *connState) {
