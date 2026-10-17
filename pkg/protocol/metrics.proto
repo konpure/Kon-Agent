@@ -106,6 +106,23 @@ message HistogramDataPoint {
   double max = 8;
 }
 
+// Handshake is the first frame exchanged on a new QUIC connection
+// (bidirectional stream, before any data stream). It follows Prometheus
+// Remote Write's semantic version negotiation: additive fields are minor
+// (compatible), removing fields is major (reject).
+message HandshakeRequest {
+  string protocol_version = 1;
+  string agent_id = 2;
+}
+
+message HandshakeResponse {
+  bool accepted = 1;
+  string server_version = 2;
+  string message = 3;
+  // Versions the server supports, for client-side diagnostics.
+  repeated string supported_versions = 4;
+}
+
 service MetricsService {
   rpc SendBatchMetrics(ExportMetricsRequest) returns (ExportMetricsResponse);
 }
