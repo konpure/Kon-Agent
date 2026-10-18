@@ -244,6 +244,9 @@ func (e *StreamEncoder) encodeNumberSeries(buf *bytes.Buffer, s *streamSeries) {
 		p := pts[0]
 		writeUvarint(buf, zigzag(p.ts))
 		writeFloat64(buf, p.val)
+		// lastDelta starts at 0, so the first point after a keyframe carries
+		// the whole collection period as its dod (5s = 5e9 ns in UnixNano).
+		// writeDod's 64-bit tier is what keeps that from being truncated.
 		st.lastTS, st.lastDelta, st.lastVal = p.ts, 0, math.Float64bits(p.val)
 		st.hasWindow = false
 		st.initialized = true

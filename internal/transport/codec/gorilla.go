@@ -26,8 +26,16 @@ type seriesState struct {
 //   [-63, 64]         -> '10'  + 7 bits  (biased +63)
 //   [-255, 256]       -> '110' + 9 bits  (biased +255)
 //   [-2047, 2048]     -> '1110'+ 12 bits (biased +2047)
-//   otherwise         -> '1111'+ 32 bits (two's complement)
+//   fits int32        -> '1111'+'0' + 32 bits (two's complement)
+//   otherwise         -> '1111'+'1' + 64 bits (two's complement)
 // Fixed-interval collection makes dod ~0, so a point costs about 1 bit.
+//
+// The 64-bit tier is a correctness requirement, not a formality: timestamps
+// are UnixNano, so the first delta after a keyframe equals the collection
+// period (a 5s period is 5e9 ns, 2.3x past int32). Without the wide tier the
+// value was silently truncated to its low 32 bits, and because the decoder
+// folds dod into a running lastDelta, every later timestamp on that
+// connection inherited the error until the next keyframe.
 // ---------------------------------------------------------------------------
 
 func writeDod(w *bitWriter, dod int64) {
@@ -44,8 +52,15 @@ func writeDod(w *bitWriter, dod int64) {
 		w.writeBits(0b1110, 4)
 		w.writeBits(uint64(dod+2047), 12)
 	default:
+		// '1111' opens the wide tier; one more bit selects its width.
 		w.writeBits(0b1111, 4)
-		w.writeBits(uint64(int32(dod)), 32)
+		if int64(int32(dod)) == dod {
+			w.writeBit(false)
+			w.writeBits(uint64(int32(dod)), 32)
+			return
+		}
+		w.writeBit(true)
+		w.writeBits(uint64(dod), 64)
 	}
 }
 
@@ -81,9 +96,17 @@ func readDod(r *bitReader) (int64, error) {
 		v, err := r.readBits(12)
 		return int64(v) - 2047, err
 	}
-	// '1111'
-	v, err := r.readBits(32)
-	return int64(int32(uint32(v))), err
+	// '1111': wide tier, one more bit selects 32 or 64 bits.
+	wide, err := r.readBit()
+	if err != nil {
+		return 0, err
+	}
+	if !wide {
+		v, err := r.readBits(32)
+		return int64(int32(uint32(v))), err
+	}
+	v, err := r.readBits(64)
+	return int64(v), err
 }
 
 // ---------------------------------------------------------------------------

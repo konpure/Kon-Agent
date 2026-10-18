@@ -193,6 +193,62 @@ func TestMissingKeyframeDetected(t *testing.T) {
 	}
 }
 
+// TestDodRoundTripWide pins every tier of the delta-of-delta coder, including
+// the 64-bit fallback. Values beyond int32 are routine here — timestamps are
+// UnixNano and a 5s period is already 5e9 ns — and used to be silently
+// truncated to their low 32 bits.
+func TestDodRoundTripWide(t *testing.T) {
+	vals := []int64{
+		0, 1, -1,
+		63, 64, -63, -64,
+		255, 256, -255,
+		2047, 2048, -2047,
+		1 << 20, -(1 << 20),
+		2147483647, 2147483648, // int32 boundary
+		-2147483648, -2147483649, // int32 boundary, negative side
+		testPeriodNanos, -testPeriodNanos, // 5s in ns: the real-world trigger
+		60 * testPeriodNanos, // long outage / WAL replay
+		1<<63 - 1, -1 << 63,  // full int64 range
+	}
+
+	w := &bitWriter{}
+	for _, v := range vals {
+		writeDod(w, v)
+	}
+	r := &bitReader{data: w.bytes()}
+	for i, want := range vals {
+		got, err := readDod(r)
+		if err != nil {
+			t.Fatalf("value %d (%d): read: %v", i, want, err)
+		}
+		if got != want {
+			t.Fatalf("value %d: dod mismatch: want %d, got %d", i, want, got)
+		}
+	}
+}
+
+// TestStreamRoundTripLargeGap: after an outage (reconnect or WAL replay) the
+// first delta dwarfs int32. The decoder folds dod into a running lastDelta,
+// so a truncation there corrupts every following timestamp, not just one.
+func TestStreamRoundTripLargeGap(t *testing.T) {
+	enc := NewStreamEncoder()
+	dec := NewStreamDecoder()
+
+	base := int64(1_700_000_000_000_000_000)
+	for _, off := range []int64{0, testPeriodNanos, 60 * testPeriodNanos, 3600 * testPeriodNanos} {
+		want := buildBatch(base+off, 3)
+		flags, payload, err := enc.Encode(want)
+		if err != nil {
+			t.Fatalf("offset %d: encode: %v", off, err)
+		}
+		got, err := dec.Decode(flags, payload)
+		if err != nil {
+			t.Fatalf("offset %d: decode: %v", off, err)
+		}
+		assertSamePoints(t, want, got)
+	}
+}
+
 // TestStatelessModes covers raw proto and snappy-only round trips.
 func TestStatelessModes(t *testing.T) {
 	want := buildBatch(1_700_000_000_000_000_000, 3)
