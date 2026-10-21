@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/konpure/Kon-Agent/internal/transport/codec"
@@ -27,6 +28,13 @@ type Config struct {
 	// CodecMode selects the wire encoding (raw/snappy/gorilla).
 	CodecMode codec.Mode
 
+	// SamplingMode: "off" | "auto" | "always" (see SamplingProcessor).
+	SamplingMode string
+	// SummaryWindow aggregates raw points when mode=always (BTrDB-style summary).
+	SummaryWindow time.Duration
+	// DegradedWindow is the coarser granularity under WAL backpressure.
+	DegradedWindow time.Duration
+
 	// WAL, when set, makes the pipeline write-through: every batch is
 	// persisted before sending, and a consumer goroutine replays the log.
 	// When nil, the pipeline falls back to direct export + in-memory requeue.
@@ -45,9 +53,11 @@ type Pipeline struct {
 	cfg        Config
 	receiver   *Receiver
 	batcher    *BatchProcessor
+	sampling   *SamplingProcessor
 	processors []Processor
 	exporter   *Exporter
 	consumer   *walConsumer // nil when WAL is disabled
+	degraded   *atomic.Bool // set by the WAL consumer's backpressure monitor
 
 	stop chan struct{}
 	done chan struct{}
@@ -64,19 +74,38 @@ func New(cfg Config, events <-chan plugin.Event, client *quic.Client) *Pipeline 
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = 5 * time.Second
 	}
-
-	p := &Pipeline{
-		cfg:        cfg,
-		receiver:   NewReceiver(events),
-		batcher:    NewBatchProcessor(cfg.MaxBatchSize, cfg.MaxPending),
-		processors: []Processor{NewSamplingProcessor()},
-		exporter:   NewExporter(client, cfg.MaxRetries, cfg.CodecMode),
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
+	if cfg.SamplingMode == "" {
+		cfg.SamplingMode = SamplingAuto
+	}
+	if cfg.SummaryWindow <= 0 {
+		cfg.SummaryWindow = time.Minute
+	}
+	if cfg.DegradedWindow <= 0 {
+		cfg.DegradedWindow = 30 * time.Second
 	}
 
+	p := &Pipeline{
+		cfg:      cfg,
+		receiver: NewReceiver(events),
+		batcher:  NewBatchProcessor(cfg.MaxBatchSize, cfg.MaxPending),
+		exporter: NewExporter(client, cfg.MaxRetries, cfg.CodecMode),
+		degraded: &atomic.Bool{},
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	p.sampling = NewSamplingProcessor(cfg.SamplingMode, cfg.SummaryWindow, cfg.DegradedWindow, p.degraded)
+	p.processors = []Processor{p.sampling}
+
 	if cfg.WAL != nil {
-		consumer, err := newWALConsumer(cfg.WAL, p.exporter, cfg.OnError, cfg.OnBackpressure)
+		// The backpressure flag feeds both the sampling processor (via the
+		// shared atomic) and the user's observability hook.
+		onPressure := func(degraded bool) {
+			p.degraded.Store(degraded)
+			if cfg.OnBackpressure != nil {
+				cfg.OnBackpressure(degraded)
+			}
+		}
+		consumer, err := newWALConsumer(cfg.WAL, p.exporter, cfg.OnError, onPressure)
 		if err != nil {
 			// Degrade to direct export rather than failing the whole agent.
 			slog.Error("Failed to init WAL consumer, falling back to direct export", "error", err)
@@ -110,7 +139,7 @@ func (p *Pipeline) Run(ctx context.Context) {
 		case ev, ok := <-p.receiver.Events():
 			if !ok {
 				slog.Info("Event channel closed, flushing tail batch")
-				p.emit(ctx, p.batcher.Take())
+				p.emitTail(ctx)
 				return
 			}
 			out, err := p.batcher.Process(ctx, []*Item{p.receiver.Convert(ev)})
@@ -124,12 +153,26 @@ func (p *Pipeline) Run(ctx context.Context) {
 			p.emit(ctx, p.batcher.Take())
 
 		case <-p.stop:
-			p.emit(ctx, p.batcher.Take())
+			p.emitTail(ctx)
 			return
 
 		case <-ctx.Done():
-			p.emit(ctx, p.batcher.Take())
+			p.emitTail(ctx)
 			return
+		}
+	}
+}
+
+// emitTail flushes the batcher AND forces the sampling window to emit its
+// partial aggregation, so shutdown does not lose in-window data.
+func (p *Pipeline) emitTail(ctx context.Context) {
+	p.sampling.ForceFlush()
+	p.emit(ctx, p.batcher.Take())
+	// The force flush above only takes effect when Process runs; if the
+	// batcher was empty, Process never ran — flush explicitly.
+	if p.sampling != nil {
+		if out, err := p.sampling.Process(ctx, nil); err == nil && len(out) > 0 {
+			p.emit(ctx, out)
 		}
 	}
 }
