@@ -24,6 +24,11 @@ type Config struct {
 		MaxSize       string        `yaml:"max_size"`
 		FsyncInterval time.Duration `yaml:"fsync_interval"`
 	} `yaml:"wal"`
+	Sampling struct {
+		Mode           string        `yaml:"mode"`            // off | auto | always
+		SummaryWindow  time.Duration `yaml:"summary_window"`  // mode=always 的聚合窗口
+		DegradedWindow time.Duration `yaml:"degraded_window"` // 背压降级粒度
+	} `yaml:"sampling"`
 }
 
 func Load(path string) (*Config, error) {
