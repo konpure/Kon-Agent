@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -23,7 +24,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// vmAddr is the VictoriaMetrics base URL; empty disables storage (print-only
+// mode). The accumulator converts agent-side delta series to cumulative.
+var (
+	vmAddr      = flag.String("vm", "http://localhost:8428", "VictoriaMetrics address (empty to disable)")
+	accumulator = newDeltaAccumulator()
+)
+
 func main() {
+	flag.Parse()
+
 	// 生成自签名证书
 	tlsCert, err := generateSelfSignedCert()
 	if err != nil {
@@ -54,6 +64,11 @@ func main() {
 	defer listener.Close()
 
 	fmt.Println("QUIC server listening on :7843")
+	if *vmAddr != "" {
+		fmt.Println("VictoriaMetrics storage:", *vmAddr)
+	} else {
+		fmt.Println("VictoriaMetrics storage disabled (print-only mode)")
+	}
 
 	for {
 		// 接受新连接
@@ -278,6 +293,16 @@ func handleUniStream(stream *quic.ReceiveStream, state *connState) {
 			continue
 		}
 		printExportRequest(stream.StreamID(), req)
+
+		// 写入 VictoriaMetrics；失败只记日志，不阻塞接收主路
+		if *vmAddr != "" {
+			lines := convertToVMLines(req, accumulator)
+			writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := postToVM(writeCtx, *vmAddr, lines); err != nil {
+				log.Printf("Failed to write to VictoriaMetrics: %v", err)
+			}
+			cancel()
+		}
 	}
 }
 
