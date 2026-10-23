@@ -175,7 +175,7 @@ func handleConnection(conn interface{}) {
 		fmt.Printf("New unidirectional stream accepted: ID=%d\n", stream.StreamID())
 
 		// 处理单向流
-		go handleUniStream(stream, state)
+		go handleUniStream(quicConn, stream, state)
 	}
 }
 
@@ -246,7 +246,7 @@ func handleHandshake(conn *quic.Conn) error {
 	return nil
 }
 
-func handleUniStream(stream *quic.ReceiveStream, state *connState) {
+func handleUniStream(conn *quic.Conn, stream *quic.ReceiveStream, state *connState) {
 	// 在quic-go v0.54.0中，ReceiveStream可能没有Close方法
 	// 使用stream.CancelRead()来取消读取并释放资源
 	defer stream.CancelRead(0)
@@ -289,8 +289,11 @@ func handleUniStream(stream *quic.ReceiveStream, state *connState) {
 		req, err := state.decoder.Decode(flags, payload)
 		state.mu.Unlock()
 		if err != nil {
-			log.Printf("Failed to decode frame (flags=%d) from stream %d: %v", flags, stream.StreamID(), err)
-			continue
+			// 解码失败意味着双端流状态失同步。关闭连接强制客户端重连：
+			// 重连后编码器重置、所有序列重发关键帧，实现无协议开销的自愈。
+			log.Printf("Failed to decode frame (flags=%d) from stream %d: %v — closing connection to force codec resync", flags, stream.StreamID(), err)
+			_ = conn.CloseWithError(0, "codec resync")
+			return
 		}
 		printExportRequest(stream.StreamID(), req)
 
