@@ -123,13 +123,16 @@ func (c *Core) Run() error {
 
 	// Build the explicit pipeline: receiver -> [batch] -> [sampling] -> [WAL] -> exporter.
 	pipe := pipeline.New(pipeline.Config{
-		AgentID:       c.cfg.ClientId,
-		MaxBatchSize:  100,
-		MaxPending:    1024,
-		FlushInterval: 5 * time.Second,
-		MaxRetries:    3,
-		CodecMode:     codecMode,
-		WAL:           walInstance,
+		AgentID:        c.cfg.ClientId,
+		MaxBatchSize:   100,
+		MaxPending:     1024,
+		FlushInterval:  5 * time.Second,
+		MaxRetries:     3,
+		CodecMode:      codecMode,
+		SamplingMode:   c.cfg.Sampling.Mode,
+		SummaryWindow:  c.cfg.Sampling.SummaryWindow,
+		DegradedWindow: c.cfg.Sampling.DegradedWindow,
+		WAL:            walInstance,
 		OnExported: func(count int) {
 			c.StateManager.IncrementMetricSent()
 			slog.Info("Successfully persisted metrics batch", "data_points", count)

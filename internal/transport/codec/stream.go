@@ -513,6 +513,10 @@ func (d *StreamDecoder) decodeNumberSeries(r *bytes.Reader, st *seriesState) ([]
 		}
 		st = &seriesState{}
 	}
+	// Decode against a scratch copy: the caller drops the whole frame on
+	// error, and a mid-decode failure must not poison the committed state
+	// (st points into d.series). Only success commits via the returned pointer.
+	work := *st
 
 	pts := make([]streamPoint, 0, count)
 	start := uint64(0)
@@ -526,9 +530,9 @@ func (d *StreamDecoder) decodeNumberSeries(r *bytes.Reader, st *seriesState) ([]
 			return nil, nil, err
 		}
 		ts := unzigzag(tsu)
-		st.lastTS, st.lastDelta, st.lastVal = ts, 0, math.Float64bits(val)
-		st.hasWindow = false
-		st.initialized = true
+		work.lastTS, work.lastDelta, work.lastVal = ts, 0, math.Float64bits(val)
+		work.hasWindow = false
+		work.initialized = true
 		pts = append(pts, streamPoint{ts: ts, val: val})
 		start = 1
 	}
@@ -557,15 +561,15 @@ func (d *StreamDecoder) decodeNumberSeries(r *bytes.Reader, st *seriesState) ([]
 		if err != nil {
 			return nil, nil, err
 		}
-		st.lastDelta += dod
-		st.lastTS += st.lastDelta
-		val, err := readValueXOR(valR, st)
+		work.lastDelta += dod
+		work.lastTS += work.lastDelta
+		val, err := readValueXOR(valR, &work)
 		if err != nil {
 			return nil, nil, err
 		}
-		pts = append(pts, streamPoint{ts: st.lastTS, val: val})
+		pts = append(pts, streamPoint{ts: work.lastTS, val: val})
 	}
-	return pts, st, nil
+	return pts, &work, nil
 }
 
 func (d *StreamDecoder) decodeHistogramSeries(r *bytes.Reader, st *seriesState) ([]streamPoint, *seriesState, error) {
@@ -579,6 +583,8 @@ func (d *StreamDecoder) decodeHistogramSeries(r *bytes.Reader, st *seriesState) 
 	if st == nil {
 		st = &seriesState{}
 	}
+	// Scratch copy, same anti-poisoning rationale as decodeNumberSeries.
+	work := *st
 
 	pts := make([]streamPoint, 0, count)
 	for i := uint64(0); i < count; i++ {
@@ -592,7 +598,7 @@ func (d *StreamDecoder) decodeHistogramSeries(r *bytes.Reader, st *seriesState) 
 			if err != nil {
 				return nil, nil, err
 			}
-			st.lastTS = unzigzag(tsu)
+			work.lastTS = unzigzag(tsu)
 			c, err := binary.ReadUvarint(r)
 			if err != nil {
 				return nil, nil, err
@@ -619,17 +625,17 @@ func (d *StreamDecoder) decodeHistogramSeries(r *bytes.Reader, st *seriesState) 
 				bounds = append(bounds, b)
 			}
 			hp.ExplicitBounds = bounds
-			st.histBounds = bounds
-			st.initialized = true
+			work.histBounds = bounds
+			work.initialized = true
 		} else {
-			if !st.initialized {
+			if !work.initialized {
 				return nil, nil, fmt.Errorf("codec: histogram delta frame for unknown series")
 			}
 			dts, err := binary.ReadUvarint(r)
 			if err != nil {
 				return nil, nil, err
 			}
-			st.lastTS += unzigzag(dts)
+			work.lastTS += unzigzag(dts)
 			c, err := binary.ReadUvarint(r)
 			if err != nil {
 				return nil, nil, err
@@ -640,9 +646,9 @@ func (d *StreamDecoder) decodeHistogramSeries(r *bytes.Reader, st *seriesState) 
 				return nil, nil, err
 			}
 			hp.Sum = sum
-			hp.ExplicitBounds = st.histBounds
+			hp.ExplicitBounds = work.histBounds
 		}
-		hp.TimeUnixNano = st.lastTS
+		hp.TimeUnixNano = work.lastTS
 
 		nb, err := binary.ReadUvarint(r)
 		if err != nil {
@@ -660,7 +666,7 @@ func (d *StreamDecoder) decodeHistogramSeries(r *bytes.Reader, st *seriesState) 
 			buckets = append(buckets, c)
 		}
 		hp.BucketCounts = buckets
-		pts = append(pts, streamPoint{ts: st.lastTS, hist: hp})
+		pts = append(pts, streamPoint{ts: work.lastTS, hist: hp})
 	}
-	return pts, st, nil
+	return pts, &work, nil
 }

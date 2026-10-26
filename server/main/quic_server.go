@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -23,7 +24,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// vmAddr is the VictoriaMetrics base URL; empty disables storage (print-only
+// mode). The accumulator converts agent-side delta series to cumulative.
+var (
+	vmAddr      = flag.String("vm", "http://localhost:8428", "VictoriaMetrics address (empty to disable)")
+	accumulator = newDeltaAccumulator()
+)
+
 func main() {
+	flag.Parse()
+
 	// 生成自签名证书
 	tlsCert, err := generateSelfSignedCert()
 	if err != nil {
@@ -54,6 +64,11 @@ func main() {
 	defer listener.Close()
 
 	fmt.Println("QUIC server listening on :7843")
+	if *vmAddr != "" {
+		fmt.Println("VictoriaMetrics storage:", *vmAddr)
+	} else {
+		fmt.Println("VictoriaMetrics storage disabled (print-only mode)")
+	}
 
 	for {
 		// 接受新连接
@@ -160,7 +175,7 @@ func handleConnection(conn interface{}) {
 		fmt.Printf("New unidirectional stream accepted: ID=%d\n", stream.StreamID())
 
 		// 处理单向流
-		go handleUniStream(stream, state)
+		go handleUniStream(quicConn, stream, state)
 	}
 }
 
@@ -231,7 +246,7 @@ func handleHandshake(conn *quic.Conn) error {
 	return nil
 }
 
-func handleUniStream(stream *quic.ReceiveStream, state *connState) {
+func handleUniStream(conn *quic.Conn, stream *quic.ReceiveStream, state *connState) {
 	// 在quic-go v0.54.0中，ReceiveStream可能没有Close方法
 	// 使用stream.CancelRead()来取消读取并释放资源
 	defer stream.CancelRead(0)
@@ -274,10 +289,23 @@ func handleUniStream(stream *quic.ReceiveStream, state *connState) {
 		req, err := state.decoder.Decode(flags, payload)
 		state.mu.Unlock()
 		if err != nil {
-			log.Printf("Failed to decode frame (flags=%d) from stream %d: %v", flags, stream.StreamID(), err)
-			continue
+			// 解码失败意味着双端流状态失同步。关闭连接强制客户端重连：
+			// 重连后编码器重置、所有序列重发关键帧，实现无协议开销的自愈。
+			log.Printf("Failed to decode frame (flags=%d) from stream %d: %v — closing connection to force codec resync", flags, stream.StreamID(), err)
+			_ = conn.CloseWithError(0, "codec resync")
+			return
 		}
 		printExportRequest(stream.StreamID(), req)
+
+		// 写入 VictoriaMetrics；失败只记日志，不阻塞接收主路
+		if *vmAddr != "" {
+			lines := convertToVMLines(req, accumulator)
+			writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := postToVM(writeCtx, *vmAddr, lines); err != nil {
+				log.Printf("Failed to write to VictoriaMetrics: %v", err)
+			}
+			cancel()
+		}
 	}
 }
 

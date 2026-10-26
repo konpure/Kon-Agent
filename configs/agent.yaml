@@ -23,3 +23,7 @@ wal:
   segment_size: 16MB
   max_size: 128MB
   fsync_interval: 1s
+sampling:
+  mode: auto            # off | auto | always
+  summary_window: 1m    # always 模式下的聚合窗口
+  degraded_window: 30s  # WAL 背压时的降级粒度
