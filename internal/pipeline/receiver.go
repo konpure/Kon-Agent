@@ -32,6 +32,9 @@ var metricUnits = map[string]string{
 	"tcp_rtt_seconds":           "s",
 	"disk_io_latency_seconds":   "s",
 	"disk_io_completed_total":   "{io}",
+	"tcp_retransmissions_total": "{packet}",
+	"tcp_connections_total":     "{connection}",
+	"tcp_established":           "{connection}",
 }
 
 // Receiver is the pipeline's source stage. It owns the plugin event channel
