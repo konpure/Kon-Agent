@@ -14,6 +14,9 @@ plugins:
   ebpf:
     enable: true
     period: 5s
+  ebpf_block:
+    enable: true
+    period: 5s
 cache:
   path: /tmp/edge_agent.cache
   max_size: 50MB
