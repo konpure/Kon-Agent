@@ -27,6 +27,13 @@ const (
 	rttKeySum         = 101
 )
 
+// tcp_health map keys (see network_monitor.c).
+const (
+	tcpHealthRetrans          = 0
+	tcpHealthEstablishedDelta = 1
+	tcpHealthEstablishedCur   = 2
+)
+
 type Tracer struct {
 	config        plugin.PluginConfig
 	stop          chan struct{}
@@ -35,11 +42,14 @@ type Tracer struct {
 }
 
 type collector struct {
-	obj      *ebpf.Collection
-	pktCount *ebpf.Map
-	rttStats *ebpf.Map
-	xdpLink  link.Link
-	kpLink   link.Link
+	obj         *ebpf.Collection
+	pktCount    *ebpf.Map
+	rttStats    *ebpf.Map
+	tcpHealth   *ebpf.Map
+	xdpLink     link.Link
+	kpLink      link.Link
+	retransLink link.Link
+	stateLink   link.Link
 }
 
 func New(config plugin.PluginConfig) plugin.Plugin {
@@ -84,6 +94,7 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 		case <-ticker.C:
 			t.emitPacketDeltas(out)
 			t.emitRTTHistogram(out)
+			t.emitTCPHealth(out)
 		case <-ctx.Done():
 			slog.Info("eBPF plugin stopped")
 			return nil
@@ -136,6 +147,68 @@ func (t *Tracer) emitRTTHistogram(out chan<- plugin.Event) {
 	slog.Debug("Emitted RTT histogram", "count", hist.Count, "avg_ms", hist.Sum/float64(hist.Count)*1000)
 }
 
+// emitTCPHealth emits TCP health metrics: retransmit and new-connection
+// counts are deltas (read-then-clear), the established count is a gauge
+// (read without clearing).
+func (t *Tracer) emitTCPHealth(out chan<- plugin.Event) {
+	if t.collector == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+
+	if retrans := t.drainKey(tcpHealthRetrans); retrans > 0 {
+		out <- plugin.Event{
+			Name:   "tcp_retransmissions_total",
+			Time:   now,
+			Labels: map[string]string{},
+			Values: float64(retrans),
+			Scope:  "ebpf",
+			Kind:   plugin.KindSumDelta,
+		}
+	}
+
+	if established := t.drainKey(tcpHealthEstablishedDelta); established > 0 {
+		out <- plugin.Event{
+			Name:   "tcp_connections_total",
+			Time:   now,
+			Labels: map[string]string{},
+			Values: float64(established),
+			Scope:  "ebpf",
+			Kind:   plugin.KindSumDelta,
+		}
+	}
+
+	// Gauge: always report the current value, even zero.
+	out <- plugin.Event{
+		Name:   "tcp_established",
+		Time:   now,
+		Labels: map[string]string{},
+		Values: float64(t.readKey(tcpHealthEstablishedCur)),
+		Scope:  "ebpf",
+		Kind:   plugin.KindGauge,
+	}
+}
+
+// drainKey reads and clears one counter key (delta semantics).
+func (t *Tracer) drainKey(key uint32) uint64 {
+	var v uint64
+	k := key
+	if err := t.collector.tcpHealth.LookupAndDelete(&k, &v); err != nil {
+		return 0
+	}
+	return v
+}
+
+// readKey reads one counter key without clearing it (gauge semantics).
+func (t *Tracer) readKey(key uint32) uint64 {
+	var v uint64
+	k := key
+	if err := t.collector.tcpHealth.Lookup(&k, &v); err != nil {
+		return 0
+	}
+	return v
+}
+
 func (t *Tracer) getDefaultInterfaceName() string {
 	if t.interfaceName != "" {
 		return t.interfaceName
@@ -185,6 +258,12 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("failed to find rtt_stats map")
 	}
 
+	tcpHealth := coll.Maps["tcp_health"]
+	if tcpHealth == nil {
+		coll.Close()
+		return fmt.Errorf("failed to find tcp_health map")
+	}
+
 	interfaceName, err := getDefaultInterface()
 	t.interfaceName = interfaceName
 	if err != nil {
@@ -218,12 +297,32 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("failed to attach kprobe: %w", err)
 	}
 
+	slog.Info("Attaching tracepoints", "points", "tcp:tcp_retransmit_skb, sock:inet_sock_set_state")
+	retransLink, err := link.Tracepoint("tcp", "tcp_retransmit_skb", coll.Programs["tcp_retrans"], nil)
+	if err != nil {
+		_ = kpLink.Close()
+		_ = xdpLink.Close()
+		coll.Close()
+		return fmt.Errorf("failed to attach tcp_retransmit_skb tracepoint: %w", err)
+	}
+	stateLink, err := link.Tracepoint("sock", "inet_sock_set_state", coll.Programs["tcp_set_state"], nil)
+	if err != nil {
+		_ = retransLink.Close()
+		_ = kpLink.Close()
+		_ = xdpLink.Close()
+		coll.Close()
+		return fmt.Errorf("failed to attach inet_sock_set_state tracepoint: %w", err)
+	}
+
 	t.collector = &collector{
-		obj:      coll,
-		pktCount: pktCount,
-		rttStats: rttStats,
-		xdpLink:  xdpLink,
-		kpLink:   kpLink,
+		obj:         coll,
+		pktCount:    pktCount,
+		rttStats:    rttStats,
+		tcpHealth:   tcpHealth,
+		xdpLink:     xdpLink,
+		kpLink:      kpLink,
+		retransLink: retransLink,
+		stateLink:   stateLink,
 	}
 	slog.Info("eBPF collector initialized successfully")
 	return nil
@@ -231,6 +330,12 @@ func (t *Tracer) initCollector() error {
 
 func (t *Tracer) closeCollector() {
 	if t.collector != nil {
+		if t.collector.retransLink != nil {
+			_ = t.collector.retransLink.Close()
+		}
+		if t.collector.stateLink != nil {
+			_ = t.collector.stateLink.Close()
+		}
 		if t.collector.kpLink != nil {
 			_ = t.collector.kpLink.Close()
 		}

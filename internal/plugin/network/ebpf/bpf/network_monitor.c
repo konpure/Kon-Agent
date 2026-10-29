@@ -118,5 +118,74 @@ int tcp_rtt(struct pt_regs *ctx) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// TCP connection health (SRE golden signal: errors).
+//
+// One small map with three keys:
+//   key 0: retransmissions since last drain   (read-then-clear -> Sum delta)
+//   key 1: connections established since drain (read-then-clear -> Sum delta)
+//   key 2: currently established connections  (read WITHOUT clear -> Gauge)
+//
+// Caveat: key 2 starts at 0 when the agent loads, so connections established
+// before startup are invisible until they close — the gauge is a trend
+// signal, not an absolute census.
+// ---------------------------------------------------------------------------
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 8);
+  __type(key, __u32);
+  __type(value, __u64);
+} tcp_health SEC(".maps");
+
+#define TCP_HEALTH_RETRANS 0
+#define TCP_HEALTH_ESTABLISHED_DELTA 1
+#define TCP_HEALTH_ESTABLISHED_CUR 2
+
+// enum tcp_state values (defined locally to avoid BTF enum dependence).
+#define TCP_ST_ESTABLISHED 1
+#define TCP_ST_CLOSE 7
+
+static __always_inline void tcp_health_add(__u32 key, __s64 delta) {
+  __u64 *v = bpf_map_lookup_elem(&tcp_health, &key);
+  if (v) {
+    if (delta >= 0) {
+      __sync_fetch_and_add(v, (__u64)delta);
+    } else if (*v >= (__u64)(-delta)) {
+      __sync_fetch_and_sub(v, (__u64)(-delta));
+    } else {
+      *v = 0; // clamp: never report a negative gauge
+    }
+  } else if (delta >= 0) {
+    __u64 init = (__u64)delta;
+    bpf_map_update_elem(&tcp_health, &key, &init, BPF_ANY);
+  }
+}
+
+SEC("tracepoint/tcp/tcp_retransmit_skb")
+int tcp_retrans(void *ctx) {
+  tcp_health_add(TCP_HEALTH_RETRANS, 1);
+  return 0;
+}
+
+// Minimal tracepoint arg layout for sock:inet_sock_set_state; only the two
+// state fields are read, but offsets must match the kernel format.
+struct set_state_args {
+  __u64 _common; // common_type/flags/preempt_count/pid
+  const void *skaddr;
+  __s32 oldstate;
+  __s32 newstate;
+};
+
+SEC("tracepoint/sock/inet_sock_set_state")
+int tcp_set_state(struct set_state_args *ctx) {
+  if (ctx->newstate == TCP_ST_ESTABLISHED) {
+    tcp_health_add(TCP_HEALTH_ESTABLISHED_DELTA, 1);
+    tcp_health_add(TCP_HEALTH_ESTABLISHED_CUR, 1);
+  } else if (ctx->oldstate == TCP_ST_ESTABLISHED) {
+    tcp_health_add(TCP_HEALTH_ESTABLISHED_CUR, -1);
+  }
+  return 0;
+}
+
 // License declaration (required)
 char _license[] SEC("license") = "GPL";
