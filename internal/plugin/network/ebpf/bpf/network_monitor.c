@@ -20,30 +20,156 @@
 
 #include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
 // ---------------------------------------------------------------------------
-// Per-interface packet counter.
+// Packet flow stats (golden signal: traffic).
+//
+// pkt_stats is keyed by (ifindex, direction, l4proto) and holds
+// packets+bytes per series. Ingress is parsed at XDP (eth/IP headers);
+// egress uses a kprobe on dev_queue_xmit, which sees the egress ifindex but
+// no parsed headers, so its l4proto stays 0 ("all").
+//
+// (A TC clsact program would be the cleaner egress hook — no function
+// signature dependence — but it needs netlink qdisc management; deferred.)
 // ---------------------------------------------------------------------------
+#define DIR_INGRESS 0
+#define DIR_EGRESS 1
+
+#define PROTO_ALL 0 // unparsed (egress kprobe) or non-IP
+
+struct pkt_key {
+  __u32 ifindex;
+  __u8 direction;
+  __u8 l4proto;
+  __u16 pad;
+};
+
+struct pkt_val {
+  __u64 packets;
+  __u64 bytes;
+};
+
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 256);
-  __type(key, __u32);   // ifindex
-  __type(value, __u64); // packets seen
-} pkt_count SEC(".maps");
+  __uint(max_entries, 1024);
+  __type(key, struct pkt_key);
+  __type(value, struct pkt_val);
+} pkt_stats SEC(".maps");
+
+// Packet size histogram (ingress only): bucket i covers
+// (bounds[i-1], bounds[i]] bytes with bounds = 64..32768 (log2).
+// Key 0..10 are buckets; 100 = sample count; 101 = bytes sum.
+#define SIZE_BUCKET_OVERFLOW 10
+#define SIZE_KEY_COUNT 100
+#define SIZE_KEY_SUM 101
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 16);
+  __type(key, __u32);
+  __type(value, __u64);
+} pkt_size SEC(".maps");
+
+// Fixed-comparison bucket assignment (no clzll — it crashes the LLVM 14 BPF
+// backend; see block_io.c for the same note).
+static __always_inline __u32 size_slot(__u32 b) {
+  if (b <= 64)
+    return 0;
+  if (b <= 128)
+    return 1;
+  if (b <= 256)
+    return 2;
+  if (b <= 512)
+    return 3;
+  if (b <= 1024)
+    return 4;
+  if (b <= 2048)
+    return 5;
+  if (b <= 4096)
+    return 6;
+  if (b <= 8192)
+    return 7;
+  if (b <= 16384)
+    return 8;
+  if (b <= 32768)
+    return 9;
+  return SIZE_BUCKET_OVERFLOW;
+}
+
+static __always_inline void pkt_stats_add(__u32 ifindex, __u8 direction,
+                                          __u8 l4proto, __u32 bytes) {
+  struct pkt_key key = {
+      .ifindex = ifindex,
+      .direction = direction,
+      .l4proto = l4proto,
+      .pad = 0,
+  };
+  struct pkt_val *v = bpf_map_lookup_elem(&pkt_stats, &key);
+  if (v) {
+    __sync_fetch_and_add(&v->packets, 1);
+    __sync_fetch_and_add(&v->bytes, bytes);
+  } else {
+    struct pkt_val init = {.packets = 1, .bytes = bytes};
+    bpf_map_update_elem(&pkt_stats, &key, &init, BPF_ANY);
+  }
+}
+
+static __always_inline void size_incr(__u32 key, __u64 delta) {
+  __u64 *v = bpf_map_lookup_elem(&pkt_size, &key);
+  if (v) {
+    __sync_fetch_and_add(v, delta);
+  } else {
+    bpf_map_update_elem(&pkt_size, &key, &delta, BPF_ANY);
+  }
+}
 
 SEC("xdp")
 int track_packets(struct xdp_md *ctx) {
-  __u32 key = ctx->ingress_ifindex;
-  __u64 *count = bpf_map_lookup_elem(&pkt_count, &key);
-  if (count) {
-    __sync_fetch_and_add(count, 1);
-  } else {
-    __u64 init_val = 1;
-    bpf_map_update_elem(&pkt_count, &key, &init_val, BPF_ANY);
+  void *data = (void *)(long)ctx->data;
+  void *data_end = (void *)(long)ctx->data_end;
+  __u32 len = (__u32)(data_end - data);
+  __u32 ifindex = ctx->ingress_ifindex;
+
+  __u8 l4proto = PROTO_ALL;
+  struct ethhdr *eth = data;
+  if ((void *)(eth + 1) <= data_end) {
+    __u16 h_proto = bpf_ntohs(eth->h_proto);
+    if (h_proto == 0x0800) { // IPv4
+      struct iphdr *ip = (void *)(eth + 1);
+      if ((void *)(ip + 1) <= data_end) {
+        l4proto = ip->protocol;
+      }
+    } else if (h_proto == 0x86DD) { // IPv6
+      struct ipv6hdr *ip6 = (void *)(eth + 1);
+      if ((void *)(ip6 + 1) <= data_end) {
+        l4proto = ip6->nexthdr;
+      }
+    }
   }
+
+  pkt_stats_add(ifindex, DIR_INGRESS, l4proto, len);
+
+  size_incr(size_slot(len), 1);
+  size_incr(SIZE_KEY_COUNT, 1);
+  size_incr(SIZE_KEY_SUM, len);
   return XDP_PASS;
+}
+
+// Egress hook: dev_queue_xmit sees the packet as it is handed to the driver.
+SEC("kprobe/dev_queue_xmit")
+int dev_egress(struct pt_regs *ctx) {
+  struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM1(ctx);
+  __u32 len = BPF_CORE_READ(skb, len);
+  struct net_device *dev = BPF_CORE_READ(skb, dev);
+  if (!dev) {
+    return 0;
+  }
+  __u32 ifindex = BPF_CORE_READ(dev, ifindex);
+  pkt_stats_add(ifindex, DIR_EGRESS, PROTO_ALL, len);
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
