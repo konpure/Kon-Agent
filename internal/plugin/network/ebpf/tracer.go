@@ -34,6 +34,29 @@ const (
 	tcpHealthEstablishedCur   = 2
 )
 
+// pkt_size map layout (see network_monitor.c).
+const (
+	sizeBucketOverflow = 10
+	sizeKeyCount       = 100
+	sizeKeySum         = 101
+)
+
+// pktSizeBoundsBytes mirrors the bucket boundaries in network_monitor.c.
+var pktSizeBoundsBytes = []float64{64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}
+
+// pktKey/pktVal mirror struct pkt_key/pkt_val in network_monitor.c.
+type pktKey struct {
+	Ifindex   uint32
+	Direction uint8
+	L4proto   uint8
+	Pad       uint16
+}
+
+type pktVal struct {
+	Packets uint64
+	Bytes   uint64
+}
+
 type Tracer struct {
 	config        plugin.PluginConfig
 	stop          chan struct{}
@@ -43,11 +66,13 @@ type Tracer struct {
 
 type collector struct {
 	obj         *ebpf.Collection
-	pktCount    *ebpf.Map
+	pktStats    *ebpf.Map
+	pktSize     *ebpf.Map
 	rttStats    *ebpf.Map
 	tcpHealth   *ebpf.Map
 	xdpLink     link.Link
 	kpLink      link.Link
+	egressLink  link.Link
 	retransLink link.Link
 	stateLink   link.Link
 }
@@ -92,7 +117,8 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 	for {
 		select {
 		case <-ticker.C:
-			t.emitPacketDeltas(out)
+			t.emitPacketFlows(out)
+			t.emitPacketSizes(out)
 			t.emitRTTHistogram(out)
 			t.emitTCPHealth(out)
 		case <-ctx.Done():
@@ -105,23 +131,104 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 	}
 }
 
-// emitPacketDeltas drains the per-interface counters (read-then-clear) and
-// emits one Sum-delta event per interface.
-func (t *Tracer) emitPacketDeltas(out chan<- plugin.Event) {
-	deltas, err := t.readPacketDeltas()
+// emitPacketFlows drains the flow stats map (read-then-clear) and emits
+// packets and bytes per (interface, direction, protocol) series.
+func (t *Tracer) emitPacketFlows(out chan<- plugin.Event) {
+	flows, err := t.readFlowStats()
 	if err != nil {
-		slog.Error("Failed to read packet deltas", "err", err)
+		slog.Error("Failed to read flow stats", "err", err)
 		return
 	}
-	for ifindex, count := range deltas {
+	now := time.Now().UnixNano()
+	for key, val := range flows {
+		labels := map[string]string{
+			"interface": interfaceName(key.Ifindex),
+			"direction": dirName(key.Direction),
+			"protocol":  protoName(key.L4proto),
+		}
 		out <- plugin.Event{
 			Name:   "network_packets_total",
-			Time:   time.Now().UnixNano(),
-			Labels: map[string]string{"interface": interfaceName(ifindex)},
-			Values: float64(count),
+			Time:   now,
+			Labels: labels,
+			Values: float64(val.Packets),
 			Scope:  "ebpf",
 			Kind:   plugin.KindSumDelta,
 		}
+		out <- plugin.Event{
+			Name:   "network_bytes_total",
+			Time:   now,
+			Labels: labels,
+			Values: float64(val.Bytes),
+			Scope:  "ebpf",
+			Kind:   plugin.KindSumDelta,
+		}
+	}
+}
+
+// emitPacketSizes drains the packet size histogram (read-then-clear) and
+// emits one Histogram event. Ingress only (XDP).
+func (t *Tracer) emitPacketSizes(out chan<- plugin.Event) {
+	if t.collector == nil {
+		return
+	}
+	buckets := make([]uint64, sizeBucketOverflow+1)
+	var count, sumBytes uint64
+
+	err := t.drainMap(t.collector.pktSize, func(key uint32, value uint64) {
+		switch {
+		case key <= sizeBucketOverflow:
+			buckets[key] = value
+		case key == sizeKeyCount:
+			count = value
+		case key == sizeKeySum:
+			sumBytes = value
+		}
+	})
+	if err != nil {
+		slog.Error("Failed to read packet size histogram", "err", err)
+		return
+	}
+	if count == 0 {
+		return
+	}
+	out <- plugin.Event{
+		Name:   "network_packet_size_bytes",
+		Time:   time.Now().UnixNano(),
+		Labels: map[string]string{},
+		Scope:  "ebpf",
+		Kind:   plugin.KindHistogram,
+		Histogram: &plugin.HistogramData{
+			Count:          count,
+			Sum:            float64(sumBytes),
+			BucketCounts:   buckets,
+			ExplicitBounds: pktSizeBoundsBytes,
+		},
+	}
+}
+
+func dirName(d uint8) string {
+	if d == 1 {
+		return "egress"
+	}
+	return "ingress"
+}
+
+// protoName maps the L4 protocol number to a label value. 0 means "all"
+// (egress kprobe path, where headers are not parsed).
+func protoName(p uint8) string {
+	switch p {
+	case 0:
+		return "all"
+	case 1:
+		return "icmp"
+	case 6:
+		return "tcp"
+	case 17:
+		return "udp"
+	case 58:
+		return "icmpv6"
+	default:
+		return "other"
 	}
 }
 
@@ -246,10 +353,16 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("failed to create eBPF collection: %w", err)
 	}
 
-	pktCount := coll.Maps["pkt_count"]
-	if pktCount == nil {
+	pktStats := coll.Maps["pkt_stats"]
+	if pktStats == nil {
 		coll.Close()
-		return fmt.Errorf("failed to find pkt_count map")
+		return fmt.Errorf("failed to find pkt_stats map")
+	}
+
+	pktSize := coll.Maps["pkt_size"]
+	if pktSize == nil {
+		coll.Close()
+		return fmt.Errorf("failed to find pkt_size map")
 	}
 
 	rttStats := coll.Maps["rtt_stats"]
@@ -279,11 +392,7 @@ func (t *Tracer) initCollector() error {
 	}
 
 	slog.Info("Attaching XDP program", "interface", interfaceName, "index", iface.Index)
-	xdpLink, err := link.AttachXDP(link.XDPOptions{
-		Program:   coll.Programs["track_packets"],
-		Interface: iface.Index,
-		Flags:     unix.XDP_FLAGS_SKB_MODE,
-	})
+	xdpLink, err := attachXDPWithFallback(coll.Programs["track_packets"], iface.Index)
 	if err != nil {
 		coll.Close()
 		return fmt.Errorf("failed to attach XDP program: %w", err)
@@ -297,9 +406,19 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("failed to attach kprobe: %w", err)
 	}
 
+	slog.Info("Attaching egress kprobe", "symbol", "dev_queue_xmit")
+	egressLink, err := link.Kprobe("dev_queue_xmit", coll.Programs["dev_egress"], nil)
+	if err != nil {
+		_ = kpLink.Close()
+		_ = xdpLink.Close()
+		coll.Close()
+		return fmt.Errorf("failed to attach egress kprobe: %w", err)
+	}
+
 	slog.Info("Attaching tracepoints", "points", "tcp:tcp_retransmit_skb, sock:inet_sock_set_state")
 	retransLink, err := link.Tracepoint("tcp", "tcp_retransmit_skb", coll.Programs["tcp_retrans"], nil)
 	if err != nil {
+		_ = egressLink.Close()
 		_ = kpLink.Close()
 		_ = xdpLink.Close()
 		coll.Close()
@@ -308,6 +427,7 @@ func (t *Tracer) initCollector() error {
 	stateLink, err := link.Tracepoint("sock", "inet_sock_set_state", coll.Programs["tcp_set_state"], nil)
 	if err != nil {
 		_ = retransLink.Close()
+		_ = egressLink.Close()
 		_ = kpLink.Close()
 		_ = xdpLink.Close()
 		coll.Close()
@@ -316,11 +436,13 @@ func (t *Tracer) initCollector() error {
 
 	t.collector = &collector{
 		obj:         coll,
-		pktCount:    pktCount,
+		pktStats:    pktStats,
+		pktSize:     pktSize,
 		rttStats:    rttStats,
 		tcpHealth:   tcpHealth,
 		xdpLink:     xdpLink,
 		kpLink:      kpLink,
+		egressLink:  egressLink,
 		retransLink: retransLink,
 		stateLink:   stateLink,
 	}
@@ -336,6 +458,9 @@ func (t *Tracer) closeCollector() {
 		if t.collector.stateLink != nil {
 			_ = t.collector.stateLink.Close()
 		}
+		if t.collector.egressLink != nil {
+			_ = t.collector.egressLink.Close()
+		}
 		if t.collector.kpLink != nil {
 			_ = t.collector.kpLink.Close()
 		}
@@ -349,14 +474,36 @@ func (t *Tracer) closeCollector() {
 	}
 }
 
-// readPacketDeltas drains the per-ifindex packet counters (read-then-clear),
-// so each reported value is the delta of the last collection window.
-func (t *Tracer) readPacketDeltas() (map[uint32]uint64, error) {
-	result := make(map[uint32]uint64)
-	err := t.drainMap(t.collectorPktCount(), func(key uint32, value uint64) {
-		result[key] = value
-	})
-	return result, err
+// readFlowStats drains the pkt_stats map (read-then-clear). Keys are
+// structs, so this cannot reuse drainMap (which is u32-keyed).
+func (t *Tracer) readFlowStats() (map[pktKey]pktVal, error) {
+	result := make(map[pktKey]pktVal)
+	if t.collector == nil || t.collector.pktStats == nil {
+		return result, fmt.Errorf("collector not initialized")
+	}
+
+	m := t.collector.pktStats
+	var key pktKey
+	var value pktVal
+	var keys []pktKey
+	iter := m.Iterate()
+	for iter.Next(&key, &value) {
+		keys = append(keys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate flow stats map: %w", err)
+	}
+	for _, k := range keys {
+		var v pktVal
+		if err := m.LookupAndDelete(&k, &v); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to lookup and delete: %w", err)
+		}
+		result[k] = v
+	}
+	return result, nil
 }
 
 // readRTTHistogram drains the RTT bucket counters (read-then-clear) and
@@ -435,11 +582,30 @@ func (t *Tracer) drainMap(m *ebpf.Map, fn func(key uint32, value uint64)) error 
 	return resultErr
 }
 
-func (t *Tracer) collectorPktCount() *ebpf.Map {
-	if t.collector == nil {
-		return nil
+// attachXDPWithFallback tries driver (native) mode first and falls back to
+// generic (SKB) mode. Native mode runs the program in the NIC driver before
+// skb allocation; generic mode is always available but costs more per packet.
+func attachXDPWithFallback(prog *ebpf.Program, ifindex int) (link.Link, error) {
+	l, err := link.AttachXDP(link.XDPOptions{
+		Program:   prog,
+		Interface: ifindex,
+		Flags:     unix.XDP_FLAGS_DRV_MODE,
+	})
+	if err == nil {
+		slog.Info("XDP attached in driver (native) mode")
+		return l, nil
 	}
-	return t.collector.pktCount
+	slog.Warn("XDP driver mode unavailable, falling back to generic (SKB) mode", "err", err)
+	l, err = link.AttachXDP(link.XDPOptions{
+		Program:   prog,
+		Interface: ifindex,
+		Flags:     unix.XDP_FLAGS_SKB_MODE,
+	})
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("XDP attached in generic (SKB) mode")
+	return l, nil
 }
 
 func (t *Tracer) collectorRTTStats() *ebpf.Map {

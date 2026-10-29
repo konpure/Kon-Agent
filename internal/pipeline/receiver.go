@@ -29,6 +29,8 @@ var metricUnits = map[string]string{
 	"disk_io_read_count_delta":  "{io}",
 	"disk_io_write_count_delta": "{io}",
 	"network_packets_total":     "{packet}",
+	"network_bytes_total":       "By",
+	"network_packet_size_bytes": "By",
 	"tcp_rtt_seconds":           "s",
 	"disk_io_latency_seconds":   "s",
 	"disk_io_completed_total":   "{io}",
