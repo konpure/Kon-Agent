@@ -62,4 +62,7 @@ build_prog internal/plugin/network/ebpf/bpf/network_monitor.c \
 build_prog internal/plugin/block/ebpf/bpf/block_io.c \
            internal/plugin/block/ebpf/output/block_io.o
 
+build_prog internal/plugin/sched/ebpf/bpf/sched_lat.c \
+           internal/plugin/sched/ebpf/output/sched_lat.o
+
 echo "All eBPF programs compiled successfully!"
