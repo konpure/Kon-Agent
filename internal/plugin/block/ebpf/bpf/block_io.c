@@ -20,15 +20,29 @@
 // REQ_OP_MASK is a macro (not in BTF); enum values like REQ_OP_WRITE are.
 #define REQ_OP_MASK 0xff
 
-// In-flight requests: request pointer -> issue timestamp (ns).
+// In-flight requests: request pointer -> issue context.
+// The issue hook runs in the submitter's process context, so the cgroup id
+// of the submitting task is captured here and carried to completion.
+struct io_start_val {
+  __u64 ts;     // issue timestamp (ns)
+  __u64 cgroup; // submitter cgroup id (0 = host / unassociated)
+};
+
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 10240);
   __type(key, struct request *);
-  __type(value, __u64);
+  __type(value, struct io_start_val);
 } io_start SEC(".maps");
 
-// Latency histogram + totals, key layout (u32):
+// Latency histogram key carries the cgroup id for per-container attribution.
+struct io_key {
+  __u64 cgroup;
+  __u32 k; // bucket/count/sum index (layout below)
+  __u32 pad;
+};
+
+// io_latency k layout:
 //   0..27    : log2 latency buckets (microseconds), reads
 //   64..91   : same buckets, writes
 //   100/101  : sample count, read / write
@@ -37,8 +51,8 @@ struct {
 // Per-CPU: hot path (per IO request), plain increments are safe.
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-  __uint(max_entries, 256);
-  __type(key, __u32);
+  __uint(max_entries, 4096);
+  __type(key, struct io_key);
   __type(value, __u64);
 } io_latency SEC(".maps");
 
@@ -52,13 +66,22 @@ struct {
 
 // io_latency is a PERCPU_HASH map: per-CPU storage makes plain increments
 // race-free on the hot path (eBPF programs are non-preemptible).
-static __always_inline void map_incr(void *map, __u32 key, __u64 delta) {
-  __u64 *v = bpf_map_lookup_elem(map, &key);
+static __always_inline void io_lat_incr(__u64 cgroup, __u32 k, __u64 delta) {
+  struct io_key key = {.cgroup = cgroup, .k = k, .pad = 0};
+  __u64 *v = bpf_map_lookup_elem(&io_latency, &key);
   if (v) {
     *v += delta;
   } else {
-    bpf_map_update_elem(map, &key, &delta, BPF_ANY);
+    bpf_map_update_elem(&io_latency, &key, &delta, BPF_ANY);
   }
+}
+
+static __always_inline void record_issue(struct request *rq) {
+  struct io_start_val v = {
+      .ts = bpf_ktime_get_ns(),
+      .cgroup = bpf_get_current_cgroup_id(),
+  };
+  bpf_map_update_elem(&io_start, &rq, &v, BPF_ANY);
 }
 
 // log2 slot for a microsecond value: slot i holds (2^(i-1), 2^i] us.
@@ -102,9 +125,15 @@ static __always_inline __u32 log2_slot(__u64 v) {
 SEC("raw_tracepoint/block_rq_issue")
 int block_rq_issue(struct bpf_raw_tracepoint_args *ctx) {
   // tracepoint block_rq_issue(struct request_queue *q, struct request *rq)
-  struct request *rq = (struct request *)ctx->args[1];
-  __u64 ts = bpf_ktime_get_ns();
-  bpf_map_update_elem(&io_start, &rq, &ts, BPF_ANY);
+  record_issue((struct request *)ctx->args[1]);
+  return 0;
+}
+
+// fentry variant: typed args via BTF (attach chain: fentry -> raw_tp ->
+// kprobe).
+SEC("fentry/blk_mq_start_request")
+int BPF_PROG(blk_start_fentry, struct request *rq) {
+  record_issue(rq);
   return 0;
 }
 
@@ -113,19 +142,18 @@ int block_rq_issue(struct bpf_raw_tracepoint_args *ctx) {
 // even though the tracepoint exists in available_events).
 SEC("kprobe/blk_mq_start_request")
 int blk_start(struct pt_regs *ctx) {
-  struct request *rq = (struct request *)PT_REGS_PARM1(ctx);
-  __u64 ts = bpf_ktime_get_ns();
-  bpf_map_update_elem(&io_start, &rq, &ts, BPF_ANY);
+  record_issue((struct request *)PT_REGS_PARM1(ctx));
   return 0;
 }
 
 // Shared completion logic between the raw tracepoint and kprobe variants.
 static __always_inline void complete_rq(struct request *rq) {
-  __u64 *tsp = bpf_map_lookup_elem(&io_start, &rq);
-  if (!tsp) {
+  struct io_start_val *sv = bpf_map_lookup_elem(&io_start, &rq);
+  if (!sv) {
     return; // we did not see the issue (e.g. agent started mid-flight)
   }
-  __u64 lat_ns = bpf_ktime_get_ns() - *tsp;
+  __u64 lat_ns = bpf_ktime_get_ns() - sv->ts;
+  __u64 cgroup = sv->cgroup;
   bpf_map_delete_elem(&io_start, &rq);
 
   __u64 lat_us = lat_ns / 1000;
@@ -133,9 +161,9 @@ static __always_inline void complete_rq(struct request *rq) {
   __u32 rw = (cmd_flags & REQ_OP_MASK) == REQ_OP_WRITE ? 1 : 0;
 
   __u32 slot = log2_slot(lat_us);
-  map_incr(&io_latency, slot + rw * 64, 1);
-  map_incr(&io_latency, 100 + rw, 1);
-  map_incr(&io_latency, 110 + rw, lat_us);
+  io_lat_incr(cgroup, slot + rw * 64, 1);
+  io_lat_incr(cgroup, 100 + rw, 1);
+  io_lat_incr(cgroup, 110 + rw, lat_us);
 
   __u32 major = BPF_CORE_READ(rq, rq_disk, major);
   __u32 minor = BPF_CORE_READ(rq, rq_disk, first_minor);
@@ -161,6 +189,13 @@ int block_rq_complete(struct bpf_raw_tracepoint_args *ctx) {
 SEC("kprobe/blk_mq_end_request")
 int blk_done(struct pt_regs *ctx) {
   struct request *rq = (struct request *)PT_REGS_PARM1(ctx);
+  complete_rq(rq);
+  return 0;
+}
+
+// fentry variant of the completion hook.
+SEC("fentry/blk_mq_end_request")
+int BPF_PROG(blk_done_fentry, struct request *rq, int error) {
   complete_rq(rq);
   return 0;
 }

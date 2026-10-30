@@ -42,11 +42,25 @@ const (
 
 var rwNames = [2]string{"read", "write"}
 
+// ioKey mirrors struct io_key in bpf/block_io.c.
+type ioKey struct {
+	Cgroup uint64
+	K      uint32
+	Pad    uint32
+}
+
+// latKey identifies one (cgroup, direction) histogram accumulator.
+type latKey struct {
+	cgroup uint64
+	rw     int
+}
+
 type Tracer struct {
 	config    plugin.PluginConfig
 	stop      chan struct{}
 	collector *collector
 	devNames  map[uint64]string // devt -> resolved device name cache
+	cgroups   *ebpfutil.CgroupResolver
 }
 
 type collector struct {
@@ -62,6 +76,7 @@ func New(config plugin.PluginConfig) plugin.Plugin {
 		config:   config,
 		stop:     make(chan struct{}),
 		devNames: make(map[uint64]string),
+		cgroups:  ebpfutil.NewCgroupResolver(),
 	}
 }
 
@@ -117,28 +132,38 @@ type latencyAcc struct {
 }
 
 // emitLatency drains the histogram map and emits one Histogram event per
-// direction (read/write). Empty windows are skipped.
+// (cgroup, direction). The cgroup is the IO submitter's, captured at issue
+// time (process context) and carried through completion.
 func (t *Tracer) emitLatency(out chan<- plugin.Event) {
 	if t.collector == nil {
 		return
 	}
-	accs := [2]*latencyAcc{{}, {}}
+	accs := make(map[latKey]*latencyAcc)
+	get := func(cg uint64, rw int) *latencyAcc {
+		lk := latKey{cgroup: cg, rw: rw}
+		acc := accs[lk]
+		if acc == nil {
+			acc = &latencyAcc{}
+			accs[lk] = acc
+		}
+		return acc
+	}
 
 	// io_latency is a PERCPU_HASH: per-CPU values are summed by the drain.
-	err := ebpfutil.DrainPercpuU64(t.collector.ioLatency, func(key uint32, value uint64) {
+	err := ebpfutil.DrainPercpu[ioKey](t.collector.ioLatency, func(key ioKey, value uint64) {
 		switch {
-		case key < writeShift && key < numBuckets:
-			accs[0].buckets[key] += value
-		case key >= writeShift && key < writeShift+numBuckets:
-			accs[1].buckets[key-writeShift] += value
-		case key == keyCountBase:
-			accs[0].count = value
-		case key == keyCountBase+1:
-			accs[1].count = value
-		case key == keySumBase:
-			accs[0].sumUS = value
-		case key == keySumBase+1:
-			accs[1].sumUS = value
+		case key.K < writeShift && key.K < numBuckets:
+			get(key.Cgroup, 0).buckets[key.K] += value
+		case key.K >= writeShift && key.K < writeShift+numBuckets:
+			get(key.Cgroup, 1).buckets[key.K-writeShift] += value
+		case key.K == keyCountBase:
+			get(key.Cgroup, 0).count = value
+		case key.K == keyCountBase+1:
+			get(key.Cgroup, 1).count = value
+		case key.K == keySumBase:
+			get(key.Cgroup, 0).sumUS = value
+		case key.K == keySumBase+1:
+			get(key.Cgroup, 1).sumUS = value
 		}
 	})
 	if err != nil {
@@ -146,18 +171,21 @@ func (t *Tracer) emitLatency(out chan<- plugin.Event) {
 		return
 	}
 
-	for rw, acc := range accs {
+	for lk, acc := range accs {
 		if acc.count == 0 {
 			continue
 		}
 		buckets := make([]uint64, numBuckets)
 		copy(buckets, acc.buckets[:])
 		out <- plugin.Event{
-			Name:   "disk_io_latency_seconds",
-			Time:   time.Now().UnixNano(),
-			Labels: map[string]string{"rw": rwNames[rw]},
-			Scope:  "ebpf_block",
-			Kind:   plugin.KindHistogram,
+			Name: "disk_io_latency_seconds",
+			Time: time.Now().UnixNano(),
+			Labels: map[string]string{
+				"rw":     rwNames[lk.rw],
+				"cgroup": t.cgroups.Name(lk.cgroup),
+			},
+			Scope: "ebpf_block",
+			Kind:  plugin.KindHistogram,
 			Histogram: &plugin.HistogramData{
 				Count:          acc.count,
 				Sum:            float64(acc.sumUS) / 1e6, // us -> s
@@ -230,18 +258,32 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("missing io_latency or io_completed map")
 	}
 
-	issueLink, err := attachWithFallback(coll, "block_rq_issue", "block_rq_issue", "blk_mq_start_request", "blk_start")
+	issueLink, issueMode, err := ebpfutil.TryAttach(coll, ebpfutil.Hook{
+		FentryProg: "blk_start_fentry",
+		RawTPName:  "block_rq_issue",
+		RawTPProg:  "block_rq_issue",
+		KprobeSym:  "blk_mq_start_request",
+		KprobeProg: "blk_start",
+	})
 	if err != nil {
 		coll.Close()
 		return fmt.Errorf("failed to attach issue hook: %w", err)
 	}
+	slog.Info("Block IO issue hook attached", "via", issueMode)
 
-	complLink, err := attachWithFallback(coll, "block_rq_complete", "block_rq_complete", "blk_mq_end_request", "blk_done")
+	complLink, complMode, err := ebpfutil.TryAttach(coll, ebpfutil.Hook{
+		FentryProg: "blk_done_fentry",
+		RawTPName:  "block_rq_complete",
+		RawTPProg:  "block_rq_complete",
+		KprobeSym:  "blk_mq_end_request",
+		KprobeProg: "blk_done",
+	})
 	if err != nil {
 		_ = issueLink.Close()
 		coll.Close()
 		return fmt.Errorf("failed to attach complete hook: %w", err)
 	}
+	slog.Info("Block IO complete hook attached", "via", complMode)
 
 	t.collector = &collector{
 		obj:         coll,
@@ -252,30 +294,6 @@ func (t *Tracer) initCollector() error {
 	}
 	slog.Info("eBPF block collector initialized successfully")
 	return nil
-}
-
-// attachWithFallback tries the raw tracepoint first (stable ABI, typed args),
-// then falls back to a kprobe on the equivalent function. This is a first
-// instance of the planned runtime degradation chain (fentry → raw_tp → kprobe).
-func attachWithFallback(coll *ebpf.Collection, tpName, tpProg, kpSym, kpProg string) (link.Link, error) {
-	if p := coll.Programs[tpProg]; p != nil {
-		l, err := link.AttachRawTracepoint(link.RawTracepointOptions{Name: tpName, Program: p})
-		if err == nil {
-			slog.Info("Attached raw tracepoint", "name", tpName)
-			return l, nil
-		}
-		slog.Warn("Raw tracepoint attach failed, falling back to kprobe", "name", tpName, "err", err)
-	}
-	p := coll.Programs[kpProg]
-	if p == nil {
-		return nil, fmt.Errorf("missing fallback program %s", kpProg)
-	}
-	l, err := link.Kprobe(kpSym, p, nil)
-	if err != nil {
-		return nil, fmt.Errorf("kprobe %s: %w", kpSym, err)
-	}
-	slog.Info("Attached kprobe fallback", "symbol", kpSym)
-	return l, nil
 }
 
 func (t *Tracer) closeCollector() {

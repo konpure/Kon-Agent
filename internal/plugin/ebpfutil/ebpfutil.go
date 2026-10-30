@@ -8,8 +8,8 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// DrainPercpuU64 sums the per-CPU u64 values of each key of a PERCPU_HASH
-// map, passes the totals to fn, then deletes the keys (read-then-clear).
+// DrainPercpu sums the per-CPU u64 values of each key of a PERCPU_HASH map,
+// passes the totals to fn, then deletes the keys (read-then-clear).
 //
 // Two notes:
 //   - LookupAndDelete is not portable to per-CPU maps on older kernels, so
@@ -17,15 +17,18 @@ import (
 //     the key (a sub-millisecond loss window per 5s window — acceptable for
 //     delta accounting).
 //   - Iteration and deletion are two phases to avoid mutating mid-scan.
-func DrainPercpuU64(m *ebpf.Map, fn func(key uint32, total uint64)) error {
+//
+// K is the map key type (fixed-size value type, e.g. uint32 or a struct
+// mirroring the C key layout).
+func DrainPercpu[K comparable](m *ebpf.Map, fn func(key K, total uint64)) error {
 	if m == nil {
 		return fmt.Errorf("ebpfutil: nil map")
 	}
 
-	var key uint32
+	var key K
 	var vals []uint64
-	var keys []uint32
-	totals := make(map[uint32]uint64)
+	var keys []K
+	totals := make(map[K]uint64)
 
 	iter := m.Iterate()
 	for iter.Next(&key, &vals) {
@@ -42,9 +45,14 @@ func DrainPercpuU64(m *ebpf.Map, fn func(key uint32, total uint64)) error {
 
 	for _, k := range keys {
 		if err := m.Delete(&k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("ebpfutil: delete key %d: %w", k, err)
+			return fmt.Errorf("ebpfutil: delete key: %w", err)
 		}
 		fn(k, totals[k])
 	}
 	return nil
+}
+
+// DrainPercpuU64 is DrainPercpu for u32-keyed maps.
+func DrainPercpuU64(m *ebpf.Map, fn func(key uint32, total uint64)) error {
+	return DrainPercpu[uint32](m, fn)
 }
