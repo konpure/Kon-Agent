@@ -1,17 +1,20 @@
 package ebpf
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/konpure/Kon-Agent/internal/plugin/ebpfutil"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
 	"golang.org/x/sys/unix"
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -117,6 +120,7 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 	for {
 		select {
 		case <-ticker.C:
+			t.maybeReattachXDP()
 			t.emitPacketFlows(out)
 			t.emitPacketSizes(out)
 			t.emitRTTHistogram(out)
@@ -174,7 +178,8 @@ func (t *Tracer) emitPacketSizes(out chan<- plugin.Event) {
 	buckets := make([]uint64, sizeBucketOverflow+1)
 	var count, sumBytes uint64
 
-	err := t.drainMap(t.collector.pktSize, func(key uint32, value uint64) {
+	// pkt_size is a PERCPU_HASH: sum per-CPU values per key.
+	err := ebpfutil.DrainPercpuU64(t.collector.pktSize, func(key uint32, value uint64) {
 		switch {
 		case key <= sizeBucketOverflow:
 			buckets[key] = value
@@ -474,8 +479,8 @@ func (t *Tracer) closeCollector() {
 	}
 }
 
-// readFlowStats drains the pkt_stats map (read-then-clear). Keys are
-// structs, so this cannot reuse drainMap (which is u32-keyed).
+// readFlowStats drains the pkt_stats map (read-then-clear). pkt_stats is a
+// PERCPU_HASH: each key holds one value per CPU, summed here.
 func (t *Tracer) readFlowStats() (map[pktKey]pktVal, error) {
 	result := make(map[pktKey]pktVal)
 	if t.collector == nil || t.collector.pktStats == nil {
@@ -484,24 +489,25 @@ func (t *Tracer) readFlowStats() (map[pktKey]pktVal, error) {
 
 	m := t.collector.pktStats
 	var key pktKey
-	var value pktVal
+	var vals []pktVal
 	var keys []pktKey
 	iter := m.Iterate()
-	for iter.Next(&key, &value) {
+	for iter.Next(&key, &vals) {
+		var total pktVal
+		for _, v := range vals {
+			total.Packets += v.Packets
+			total.Bytes += v.Bytes
+		}
 		keys = append(keys, key)
+		result[key] = total
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("failed to iterate flow stats map: %w", err)
 	}
 	for _, k := range keys {
-		var v pktVal
-		if err := m.LookupAndDelete(&k, &v); err != nil {
-			if errors.Is(err, ebpf.ErrKeyNotExist) {
-				continue
-			}
-			return nil, fmt.Errorf("failed to lookup and delete: %w", err)
+		if err := m.Delete(&k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil, fmt.Errorf("failed to delete flow key: %w", err)
 		}
-		result[k] = v
 	}
 	return result, nil
 }
@@ -623,8 +629,68 @@ func interfaceName(ifindex uint32) string {
 	return fmt.Sprintf("if%d", ifindex)
 }
 
-// Get default interface name
+// maybeReattachXDP follows the default route: when the system switches to
+// another egress interface (hotplug, route change), re-attach the XDP
+// program. The new link is attached before the old one is dropped — a brief
+// double-attach only double-counts for a moment; the reverse would lose
+// packets.
+func (t *Tracer) maybeReattachXDP() {
+	name, err := defaultRouteInterface()
+	if err != nil || name == "" || name == t.interfaceName {
+		return
+	}
+	iface, err := net.InterfaceByName(name)
+	if err != nil || t.collector == nil {
+		return
+	}
+	slog.Info("Default route interface changed, re-attaching XDP",
+		"from", t.interfaceName, "to", name)
+	newLink, err := attachXDPWithFallback(t.collector.obj.Programs["track_packets"], iface.Index)
+	if err != nil {
+		slog.Error("Failed to re-attach XDP", "interface", name, "err", err)
+		return
+	}
+	if t.collector.xdpLink != nil {
+		_ = t.collector.xdpLink.Close()
+	}
+	t.collector.xdpLink = newLink
+	t.interfaceName = name
+}
+
+// defaultRouteInterface returns the interface carrying the default IPv4
+// route, parsed from /proc/net/route (no netlink dependency).
+func defaultRouteInterface() (string, error) {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return "", fmt.Errorf("failed to open /proc/net/route: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Scan() // header line
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[1] == "00000000" { // default route
+			return fields[0], nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("failed to parse /proc/net/route: %w", err)
+	}
+	return "", fmt.Errorf("no default route found")
+}
+
+// Get default interface name: prefer the default-route interface (the first
+// active-interface heuristic can pick docker0 or other virtual NICs).
 func getDefaultInterface() (string, error) {
+	if name, err := defaultRouteInterface(); err == nil {
+		slog.Info("Using default route interface", "interface", name)
+		return name, nil
+	}
+
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return "", fmt.Errorf("failed to get network interfaces: %w", err)

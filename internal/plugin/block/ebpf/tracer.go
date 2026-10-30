@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/konpure/Kon-Agent/internal/plugin/ebpfutil"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
 )
 
@@ -123,7 +124,8 @@ func (t *Tracer) emitLatency(out chan<- plugin.Event) {
 	}
 	accs := [2]*latencyAcc{{}, {}}
 
-	err := t.drainMap32(t.collector.ioLatency, func(key uint32, value uint64) {
+	// io_latency is a PERCPU_HASH: per-CPU values are summed by the drain.
+	err := ebpfutil.DrainPercpuU64(t.collector.ioLatency, func(key uint32, value uint64) {
 		switch {
 		case key < writeShift && key < numBuckets:
 			accs[0].buckets[key] += value
@@ -291,33 +293,8 @@ func (t *Tracer) closeCollector() {
 	}
 }
 
-// drainMap32 collects keys first, then LookupAndDelete each of them
-// (two phases to avoid mutating the map during iteration).
-func (t *Tracer) drainMap32(m *ebpf.Map, fn func(key uint32, value uint64)) error {
-	var key uint32
-	var value uint64
-	var keys []uint32
-	iter := m.Iterate()
-	for iter.Next(&key, &value) {
-		keys = append(keys, key)
-	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("failed to iterate map: %w", err)
-	}
-	for _, k := range keys {
-		var v uint64
-		if err := m.LookupAndDelete(&k, &v); err != nil {
-			if errors.Is(err, ebpf.ErrKeyNotExist) {
-				continue
-			}
-			return fmt.Errorf("failed to lookup and delete: %w", err)
-		}
-		fn(k, v)
-	}
-	return nil
-}
-
-// drainMap64 is drainMap32 for u64-keyed maps.
+// drainMap64 drains a u64-keyed HASH map: collect keys first, then
+// LookupAndDelete each of them (two phases to avoid mutating mid-scan).
 func (t *Tracer) drainMap64(m *ebpf.Map, fn func(key uint64, value uint64)) error {
 	var key uint64
 	var value uint64
