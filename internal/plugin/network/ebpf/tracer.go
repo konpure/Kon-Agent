@@ -2,11 +2,14 @@ package ebpf
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/konpure/Kon-Agent/internal/plugin/ebpfutil"
 	"github.com/konpure/Kon-Agent/pkg/plugin"
@@ -14,7 +17,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,6 +70,17 @@ type Tracer struct {
 	stop          chan struct{}
 	collector     *collector
 	interfaceName string
+
+	dropMu     sync.Mutex
+	dropCounts map[uint32]uint64 // drop reason -> count since last tick
+}
+
+// dropEvent mirrors struct drop_event in network_monitor.c.
+type dropEvent struct {
+	Reason   uint32
+	Protocol uint16
+	Pad      uint16
+	Comm     [16]byte
 }
 
 type collector struct {
@@ -78,12 +94,15 @@ type collector struct {
 	egressLink  link.Link
 	retransLink link.Link
 	stateLink   link.Link
+	dropLink    link.Link
+	dropRd      *ringbuf.Reader
 }
 
 func New(config plugin.PluginConfig) plugin.Plugin {
 	return &Tracer{
-		config: config,
-		stop:   make(chan struct{}),
+		config:     config,
+		stop:       make(chan struct{}),
+		dropCounts: make(map[uint32]uint64),
 	}
 }
 
@@ -114,6 +133,10 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 	}
 	defer t.closeCollector()
 
+	// Event-driven drop channel: consume the ring buffer in the background,
+	// aggregate per reason, and let the periodic tick emit the counts.
+	go t.readDrops()
+
 	ticker := time.NewTicker(t.config.Period)
 	defer ticker.Stop()
 
@@ -125,6 +148,7 @@ func (t *Tracer) Run(ctx context.Context, out chan<- plugin.Event) error {
 			t.emitPacketSizes(out)
 			t.emitRTTHistogram(out)
 			t.emitTCPHealth(out)
+			t.emitDrops(out)
 		case <-ctx.Done():
 			slog.Info("eBPF plugin stopped")
 			return nil
@@ -208,6 +232,98 @@ func (t *Tracer) emitPacketSizes(out chan<- plugin.Event) {
 			BucketCounts:   buckets,
 			ExplicitBounds: pktSizeBoundsBytes,
 		},
+	}
+}
+
+// readDrops consumes the drop ring buffer until it is closed.
+func (t *Tracer) readDrops() {
+	for {
+		record, err := t.collector.dropRd.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				return
+			}
+			slog.Error("Failed to read drop event", "err", err)
+			continue
+		}
+		var ev dropEvent
+		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &ev); err != nil {
+			continue
+		}
+		t.dropMu.Lock()
+		t.dropCounts[ev.Reason]++
+		t.dropMu.Unlock()
+	}
+}
+
+// emitDrops flushes the aggregated drop counts as a Sum-delta metric.
+func (t *Tracer) emitDrops(out chan<- plugin.Event) {
+	t.dropMu.Lock()
+	counts := t.dropCounts
+	t.dropCounts = make(map[uint32]uint64)
+	t.dropMu.Unlock()
+
+	now := time.Now().UnixNano()
+	for reason, count := range counts {
+		out <- plugin.Event{
+			Name:   "packet_drops_total",
+			Time:   now,
+			Labels: map[string]string{"reason": dropReasonName(reason)},
+			Values: float64(count),
+			Scope:  "ebpf",
+			Kind:   plugin.KindSumDelta,
+		}
+	}
+}
+
+// dropReasonSupported reports whether the kernel's kfree_skb tracepoint
+// carries a drop reason field at the fixed offset 28 (kernel 5.17+).
+// The offset must match DROP_REASON_OFF in network_monitor.c because the
+// verifier requires constant ctx offsets in the BPF program.
+func dropReasonSupported() bool {
+	for _, base := range []string{"/sys/kernel/tracing", "/sys/kernel/debug/tracing"} {
+		data, err := os.ReadFile(base + "/events/skb/kfree_skb/format")
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "field:") || !strings.Contains(line, " reason;") {
+				continue
+			}
+			for _, part := range strings.Split(line, ";") {
+				part = strings.TrimSpace(part)
+				if !strings.HasPrefix(part, "offset:") {
+					continue
+				}
+				off, err := strconv.ParseUint(strings.TrimPrefix(part, "offset:"), 10, 32)
+				return err == nil && off == 28
+			}
+		}
+	}
+	return false
+}
+
+// dropReasonName maps SKB_DROP_REASON_* values to short labels.
+// 0 means "unknown" (kernel < 5.17 or unprobed).
+func dropReasonName(reason uint32) string {
+	switch reason {
+	case 0:
+		return "unknown"
+	case 1:
+		return "unspecified"
+	case 2:
+		return "no_socket"
+	case 3:
+		return "pkt_too_small"
+	case 4:
+		return "tcp_csum"
+	case 5:
+		return "socket_filter"
+	case 6:
+		return "ipv6_disabled"
+	default:
+		return "reason_" + strconv.FormatUint(uint64(reason), 10)
 	}
 }
 
@@ -403,13 +519,17 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("failed to attach XDP program: %w", err)
 	}
 
-	slog.Info("Attaching kprobe", "symbol", "tcp_rcv_established")
-	kpLink, err := link.Kprobe("tcp_rcv_established", coll.Programs["tcp_rtt"], nil)
+	kpLink, kpMode, err := ebpfutil.TryAttach(coll, ebpfutil.Hook{
+		FentryProg: "tcp_rtt_fentry",
+		KprobeSym:  "tcp_rcv_established",
+		KprobeProg: "tcp_rtt",
+	})
 	if err != nil {
 		_ = xdpLink.Close()
 		coll.Close()
-		return fmt.Errorf("failed to attach kprobe: %w", err)
+		return fmt.Errorf("failed to attach RTT hook: %w", err)
 	}
+	slog.Info("RTT hook attached", "via", kpMode)
 
 	slog.Info("Attaching egress kprobe", "symbol", "dev_queue_xmit")
 	egressLink, err := link.Kprobe("dev_queue_xmit", coll.Programs["dev_egress"], nil)
@@ -439,6 +559,42 @@ func (t *Tracer) initCollector() error {
 		return fmt.Errorf("failed to attach inet_sock_set_state tracepoint: %w", err)
 	}
 
+	// Packet drop channel: probe whether the reason field exists at the
+	// fixed offset (5.17+), then attach and open the ring buffer.
+	dropCfg := coll.Maps["drop_cfg"]
+	if dropReasonSupported() {
+		var zero uint32
+		var one uint32 = 1
+		if err := dropCfg.Update(zero, one, 0); err != nil {
+			slog.Warn("Failed to set drop reason flag, reasons will be unknown", "err", err)
+		} else {
+			slog.Info("Drop reason field probed")
+		}
+	} else {
+		slog.Info("Drop reason field not present on this kernel (< 5.17)")
+	}
+	dropLink, err := link.Tracepoint("skb", "kfree_skb", coll.Programs["on_kfree_skb"], nil)
+	if err != nil {
+		_ = stateLink.Close()
+		_ = retransLink.Close()
+		_ = egressLink.Close()
+		_ = kpLink.Close()
+		_ = xdpLink.Close()
+		coll.Close()
+		return fmt.Errorf("failed to attach kfree_skb tracepoint: %w", err)
+	}
+	dropRd, err := ringbuf.NewReader(coll.Maps["drop_events"])
+	if err != nil {
+		_ = dropLink.Close()
+		_ = stateLink.Close()
+		_ = retransLink.Close()
+		_ = egressLink.Close()
+		_ = kpLink.Close()
+		_ = xdpLink.Close()
+		coll.Close()
+		return fmt.Errorf("failed to open drop ring buffer: %w", err)
+	}
+
 	t.collector = &collector{
 		obj:         coll,
 		pktStats:    pktStats,
@@ -450,6 +606,8 @@ func (t *Tracer) initCollector() error {
 		egressLink:  egressLink,
 		retransLink: retransLink,
 		stateLink:   stateLink,
+		dropLink:    dropLink,
+		dropRd:      dropRd,
 	}
 	slog.Info("eBPF collector initialized successfully")
 	return nil
@@ -457,6 +615,12 @@ func (t *Tracer) initCollector() error {
 
 func (t *Tracer) closeCollector() {
 	if t.collector != nil {
+		if t.collector.dropRd != nil {
+			_ = t.collector.dropRd.Close()
+		}
+		if t.collector.dropLink != nil {
+			_ = t.collector.dropLink.Close()
+		}
 		if t.collector.retransLink != nil {
 			_ = t.collector.retransLink.Close()
 		}
@@ -516,76 +680,51 @@ func (t *Tracer) readFlowStats() (map[pktKey]pktVal, error) {
 // builds the aggregated histogram. Returns nil when no samples arrived in
 // this window.
 func (t *Tracer) readRTTHistogram() (*plugin.HistogramData, error) {
+	if t.collector == nil || t.collector.rttStats == nil {
+		return nil, fmt.Errorf("collector not initialized")
+	}
+
 	buckets := make([]uint64, len(rttBoundsSeconds)+1)
 	var count, sumUS uint64
 
-	err := t.drainMap(t.collectorRTTStats(), func(key uint32, value uint64) {
-		switch {
-		case key <= rttBucketOverflow:
-			buckets[key] = value
-		case key == rttKeyCount:
-			count = value
-		case key == rttKeySum:
-			sumUS = value
-		}
-	})
-	if err != nil {
-		return nil, err
+	m := t.collector.rttStats
+	var key uint32
+	var value uint64
+	var keys []uint32
+	iter := m.Iterate()
+	for iter.Next(&key, &value) {
+		keys = append(keys, key)
 	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate rtt map: %w", err)
+	}
+	for _, k := range keys {
+		var v uint64
+		if err := m.LookupAndDelete(&k, &v); err != nil {
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to lookup and delete: %w", err)
+		}
+		switch {
+		case k <= rttBucketOverflow:
+			buckets[k] = v
+		case k == rttKeyCount:
+			count = v
+		case k == rttKeySum:
+			sumUS = v
+		}
+	}
+
 	if count == 0 {
 		return nil, nil
 	}
-
 	return &plugin.HistogramData{
 		Count:          count,
 		Sum:            float64(sumUS) / 1e6, // microseconds -> seconds
 		BucketCounts:   buckets,
 		ExplicitBounds: rttBoundsSeconds,
 	}, nil
-}
-
-// drainMap collects a map's keys, then LookupAndDelete's each of them
-// (two phases to avoid mutating the map during iteration).
-func (t *Tracer) drainMap(m *ebpf.Map, fn func(key uint32, value uint64)) error {
-	if m == nil {
-		return fmt.Errorf("collector not initialized")
-	}
-	var resultErr error
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("Recovered from panic", "err", r)
-				resultErr = fmt.Errorf("recovered from panic: %v", r)
-			}
-		}()
-
-		var key uint32
-		var value uint64
-		var keys []uint32
-		iter := m.Iterate()
-		for iter.Next(&key, &value) {
-			keys = append(keys, key)
-		}
-		if err := iter.Err(); err != nil {
-			resultErr = fmt.Errorf("failed to iterate map: %w", err)
-			return
-		}
-
-		for _, k := range keys {
-			var v uint64
-			if err := m.LookupAndDelete(&k, &v); err != nil {
-				if errors.Is(err, ebpf.ErrKeyNotExist) {
-					continue
-				}
-				resultErr = fmt.Errorf("failed to lookup and delete: %w", err)
-				return
-			}
-			fn(k, v)
-		}
-	}()
-
-	return resultErr
 }
 
 // attachXDPWithFallback tries driver (native) mode first and falls back to
@@ -612,13 +751,6 @@ func attachXDPWithFallback(prog *ebpf.Program, ifindex int) (link.Link, error) {
 	}
 	slog.Info("XDP attached in generic (SKB) mode")
 	return l, nil
-}
-
-func (t *Tracer) collectorRTTStats() *ebpf.Map {
-	if t.collector == nil {
-		return nil
-	}
-	return t.collector.rttStats
 }
 
 // interfaceName resolves an ifindex to its name, falling back to "if<N>".

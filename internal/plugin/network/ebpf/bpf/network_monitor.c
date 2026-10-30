@@ -190,6 +190,10 @@ int dev_egress(struct pt_regs *ctx) {
 #define RTT_KEY_COUNT 100
 #define RTT_KEY_SUM 101
 
+// Per-cgroup RTT attribution was reverted: bpf_sk_cgroup_id is not available
+// to tracing programs on Ubuntu 5.15 generic (verifier: "unknown func
+// bpf_sk_cgroup_id#128" at load). Plain bucket keys; attribution is future
+// work (newer kernels or sock_ops programs).
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 128);
@@ -230,20 +234,30 @@ static __always_inline __u32 rtt_bucket(__u64 rtt_us) {
   return RTT_BUCKET_OVERFLOW;
 }
 
-SEC("kprobe/tcp_rcv_established")
-int tcp_rtt(struct pt_regs *ctx) {
-  struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+static __always_inline void record_rtt(struct sock *sk) {
   struct tcp_sock *tp = (struct tcp_sock *)sk;
 
   // srtt_us is the kernel's smoothed RTT estimator, stored scaled by 8.
   __u64 rtt_us = (__u64)BPF_CORE_READ(tp, srtt_us) >> 3;
   if (rtt_us == 0) {
-    return 0;
+    return;
   }
 
   rtt_incr(rtt_bucket(rtt_us), 1);
   rtt_incr(RTT_KEY_COUNT, 1);
   rtt_incr(RTT_KEY_SUM, rtt_us);
+}
+
+SEC("kprobe/tcp_rcv_established")
+int tcp_rtt(struct pt_regs *ctx) {
+  record_rtt((struct sock *)PT_REGS_PARM1(ctx));
+  return 0;
+}
+
+// fentry variant: typed args via BTF, no pt_regs layout dependence.
+SEC("fentry/tcp_rcv_established")
+int BPF_PROG(tcp_rtt_fentry, struct sock *sk) {
+  record_rtt(sk);
   return 0;
 }
 
@@ -313,6 +327,61 @@ int tcp_set_state(struct set_state_args *ctx) {
   } else if (ctx->oldstate == TCP_ST_ESTABLISHED) {
     tcp_health_add(TCP_HEALTH_ESTABLISHED_CUR, -1);
   }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Packet drop event channel (ring buffer).
+//
+// Drops are rare, so this channel is event-driven (ringbuf) instead of the
+// polling pattern used for counters — the polling-vs-event-driven contrast
+// is deliberate. The drop reason field only exists on kernel 5.17+; its
+// offset is probed from the tracepoint format file by userspace and passed
+// through drop_cfg (0xFFFFFFFF = absent on this kernel).
+// ---------------------------------------------------------------------------
+struct drop_event {
+  __u32 reason;
+  __u16 protocol;
+  __u8 pad[2];
+  char comm[16];
+};
+
+struct {
+  __uint(type, BPF_MAP_TYPE_RINGBUF);
+  __uint(max_entries, 256 * 1024);
+} drop_events SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, __u32); // 1 = the reason field exists at DROP_REASON_OFF
+} drop_cfg SEC(".maps");
+
+// The verifier requires constant ctx offsets, so the field offset cannot be
+// passed through the map; userspace probes the format file and only sets the
+// flag when reason sits at the layout's fixed position (protocol at 24,
+// 2 bytes padding, reason at 28 on 5.17+).
+#define DROP_REASON_OFF 28
+
+SEC("tracepoint/skb/kfree_skb")
+int on_kfree_skb(void *ctx) {
+  struct drop_event *e = bpf_ringbuf_reserve(&drop_events, sizeof(*e), 0);
+  if (!e) {
+    return 0;
+  }
+  // protocol is at offset 24 in the tracepoint record (all kernels).
+  e->protocol = *(__u16 *)((char *)ctx + 24);
+  bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+  __u32 zero = 0;
+  __u32 *has = bpf_map_lookup_elem(&drop_cfg, &zero);
+  if (has && *has == 1) {
+    e->reason = *(__u32 *)((char *)ctx + DROP_REASON_OFF);
+  } else {
+    e->reason = 0; // unknown on this kernel
+  }
+  bpf_ringbuf_submit(e, 0);
   return 0;
 }
 
