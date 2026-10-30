@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # scripts/build_ebpf.sh
+# Builds all eBPF programs (network monitor, block IO latency, ...).
 
 set -e
 
@@ -21,19 +22,6 @@ if [ ! -f /sys/kernel/btf/vmlinux ]; then
     exit 1
 fi
 
-# BPF 源码独立于 Go 包目录（避免 cgo 用宿主编译器误编译），产物仍输出到包目录下
-EBPF_SRC=internal/plugin/network/ebpf/bpf
-EBPF_OUT=internal/plugin/network/ebpf/output
-
-mkdir -p $EBPF_OUT
-
-# vmlinux.h 体积较大（MB 级）且与运行内核绑定，不纳入版本管理（见 .gitignore）；
-# 仅在缺失或显式删除后重新生成
-if [ ! -f $EBPF_SRC/vmlinux.h ]; then
-    echo "Generating vmlinux.h from kernel BTF..."
-    bpftool btf dump file /sys/kernel/btf/vmlinux format c > $EBPF_SRC/vmlinux.h
-fi
-
 # bpf_tracing.h 的 PT_REGS_PARM1 等宏需要 __TARGET_ARCH_xxx 选定寄存器布局；
 # 按主机架构自动映射（边缘设备常见 arm64）
 ARCH=$(uname -m)
@@ -50,10 +38,31 @@ case "$ARCH" in
         ;;
 esac
 
-# 编译 eBPF 程序，-g 生成 BTF 调试信息供 CO-RE 重定位
-echo "Compiling eBPF program with CO-RE support (target arch: $BPF_ARCH)..."
-clang -g -O2 -target bpf -D__TARGET_ARCH_${BPF_ARCH} -I $EBPF_SRC \
-    -c $EBPF_SRC/network_monitor.c -o $EBPF_OUT/network_monitor.o
+# vmlinux.h 为所有 BPF 程序共享，体积大且与运行内核绑定，不入版本管理
+SHARED_INC=internal/plugin/bpf
+mkdir -p $SHARED_INC
+if [ ! -f $SHARED_INC/vmlinux.h ]; then
+    echo "Generating vmlinux.h from kernel BTF..."
+    bpftool btf dump file /sys/kernel/btf/vmlinux format c > $SHARED_INC/vmlinux.h
+fi
 
-echo "eBPF program compiled successfully!"
-echo "Output: $EBPF_OUT/network_monitor.o"
+build_prog() {
+    local src=$1
+    local out=$2
+    mkdir -p "$(dirname "$out")"
+    echo "Compiling $src (target arch: $BPF_ARCH)..."
+    # -g 生成 BTF 调试信息供 CO-RE 重定位
+    clang -g -O2 -target bpf -D__TARGET_ARCH_${BPF_ARCH} -I $SHARED_INC \
+        -c "$src" -o "$out"
+}
+
+build_prog internal/plugin/network/ebpf/bpf/network_monitor.c \
+           internal/plugin/network/ebpf/output/network_monitor.o
+
+build_prog internal/plugin/block/ebpf/bpf/block_io.c \
+           internal/plugin/block/ebpf/output/block_io.o
+
+build_prog internal/plugin/sched/ebpf/bpf/sched_lat.c \
+           internal/plugin/sched/ebpf/output/sched_lat.o
+
+echo "All eBPF programs compiled successfully!"

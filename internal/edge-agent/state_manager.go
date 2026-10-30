@@ -111,23 +111,35 @@ func (sm *StateManager) persistState() error {
 		return err
 	}
 
-	file, err := os.Create(sm.stateFile)
+	// Atomic write (tmp + rename, same pattern as the WAL checkpoint):
+	// a crash mid-write never leaves a truncated state file behind.
+	tmp := sm.stateFile + ".tmp"
+	file, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
 	sm.mutex.RLock()
-	defer sm.mutex.RUnlock()
-
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", " ")
-	return encoder.Encode(sm.state)
+	encodeErr := encoder.Encode(sm.state)
+	sm.mutex.RUnlock()
+
+	closeErr := file.Close()
+	if encodeErr != nil {
+		return encodeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(tmp, sm.stateFile)
 }
 
 func (sm *StateManager) loadState() {
-	if _, err := os.Stat(sm.stateFile); os.IsNotExist(err) {
-		slog.Info("State file not found, starting with fresh state")
+	st, err := os.Stat(sm.stateFile)
+	if os.IsNotExist(err) || (err == nil && st.Size() == 0) {
+		// Missing or empty (torn write from a crash on an older version).
+		slog.Info("No usable state file, starting with fresh state")
 		return
 	}
 
