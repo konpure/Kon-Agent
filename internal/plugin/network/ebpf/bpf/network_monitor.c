@@ -53,7 +53,7 @@ struct pkt_val {
 };
 
 struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
   __uint(max_entries, 1024);
   __type(key, struct pkt_key);
   __type(value, struct pkt_val);
@@ -67,7 +67,7 @@ struct {
 #define SIZE_KEY_SUM 101
 
 struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
   __uint(max_entries, 16);
   __type(key, __u32);
   __type(value, __u64);
@@ -99,6 +99,9 @@ static __always_inline __u32 size_slot(__u32 b) {
   return SIZE_BUCKET_OVERFLOW;
 }
 
+// Per-CPU maps: each CPU owns its copy, so plain increments are race-free
+// (eBPF programs are non-preemptible) and there is no cross-core cacheline
+// contention — no atomics needed on the hot path.
 static __always_inline void pkt_stats_add(__u32 ifindex, __u8 direction,
                                           __u8 l4proto, __u32 bytes) {
   struct pkt_key key = {
@@ -109,8 +112,8 @@ static __always_inline void pkt_stats_add(__u32 ifindex, __u8 direction,
   };
   struct pkt_val *v = bpf_map_lookup_elem(&pkt_stats, &key);
   if (v) {
-    __sync_fetch_and_add(&v->packets, 1);
-    __sync_fetch_and_add(&v->bytes, bytes);
+    v->packets += 1;
+    v->bytes += bytes;
   } else {
     struct pkt_val init = {.packets = 1, .bytes = bytes};
     bpf_map_update_elem(&pkt_stats, &key, &init, BPF_ANY);
@@ -120,7 +123,7 @@ static __always_inline void pkt_stats_add(__u32 ifindex, __u8 direction,
 static __always_inline void size_incr(__u32 key, __u64 delta) {
   __u64 *v = bpf_map_lookup_elem(&pkt_size, &key);
   if (v) {
-    __sync_fetch_and_add(v, delta);
+    *v += delta;
   } else {
     bpf_map_update_elem(&pkt_size, &key, &delta, BPF_ANY);
   }

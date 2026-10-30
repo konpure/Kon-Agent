@@ -34,8 +34,9 @@ struct {
 //   100/101  : sample count, read / write
 //   110/111  : latency sum (microseconds), read / write
 // Keep in sync with the Go side (tracer.go).
+// Per-CPU: hot path (per IO request), plain increments are safe.
 struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
   __uint(max_entries, 256);
   __type(key, __u32);
   __type(value, __u64);
@@ -49,10 +50,12 @@ struct {
   __type(value, __u64);
 } io_completed SEC(".maps");
 
+// io_latency is a PERCPU_HASH map: per-CPU storage makes plain increments
+// race-free on the hot path (eBPF programs are non-preemptible).
 static __always_inline void map_incr(void *map, __u32 key, __u64 delta) {
   __u64 *v = bpf_map_lookup_elem(map, &key);
   if (v) {
-    __sync_fetch_and_add(v, delta);
+    *v += delta;
   } else {
     bpf_map_update_elem(map, &key, &delta, BPF_ANY);
   }
