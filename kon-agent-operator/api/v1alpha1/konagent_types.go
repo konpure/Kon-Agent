@@ -18,7 +18,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"time"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -31,6 +30,14 @@ type KonAgentSpec struct {
 
 	// +kubebuilder:validation:Required
 	ClientId string `json:"clientId"`
+
+	// Server is the ingest endpoint the agent reports to, e.g. "quic://vm:7843".
+	// Without it the generated agent.yaml has nowhere to connect.
+	// +kubebuilder:validation:Required
+	Server string `json:"server"`
+
+	// Image is the agent container image; defaults to konpure/kon-agent:latest.
+	Image string `json:"image,omitempty"`
 
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10
@@ -50,9 +57,11 @@ type PluginConfig struct {
 	// +kubebuilder:validation:Required
 	Enable bool `json:"enable"`
 
-	// Period defines how often the plugin should run
+	// Period defines how often the plugin should run, e.g. "5s".
+	// A string is used instead of time.Duration because the CRD schema
+	// serializes Duration as raw nanoseconds, which is unreadable in a CR.
 	// +kubebuilder:validation:Required
-	Period time.Duration `json:"period"`
+	Period string `json:"period"`
 
 	// PluginType specifies the type of the plugin
 	PluginType string `json:"pluginType,omitempty"`

@@ -166,6 +166,11 @@ func (r *KonAgentReconciler) buildDeployment(konAgent *corev1alpha1.KonAgent, co
 		replicas = *konAgent.Spec.Replicas
 	}
 
+	image := konAgent.Spec.Image
+	if image == "" {
+		image = "konpure/kon-agent:latest"
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-deployment", konAgent.Name),
@@ -194,7 +199,7 @@ func (r *KonAgentReconciler) buildDeployment(konAgent *corev1alpha1.KonAgent, co
 					Containers: []corev1.Container{
 						{
 							Name:  "kon-agent",
-							Image: "konpure/kon-agent:latest",
+							Image: image,
 							Command: []string{
 								"./edge-agent",
 							},
@@ -406,15 +411,15 @@ func (r *KonAgentReconciler) ensureConfigMap(ctx context.Context, konAgent *core
 }
 
 func (r *KonAgentReconciler) generateConfigContent(konAgent *corev1alpha1.KonAgent) string {
-	// This function generates the agent.yaml content based on the KonAgent spec
-	// You'll need to implement this according to your configuration format
-	// This is a simplified example
-	config := fmt.Sprintf("client-id: %s\n", konAgent.Spec.ClientId)
+	// Generate agent.yaml content from the KonAgent spec. Keys must match the
+	// agent's config loader (kebab-case client-id, snake_case max_size).
+	config := fmt.Sprintf("server: %s\n", konAgent.Spec.Server)
+	config += fmt.Sprintf("client-id: %s\n", konAgent.Spec.ClientId)
 	config += "plugins:\n"
 	for name, plugin := range konAgent.Spec.Plugins {
 		config += fmt.Sprintf("  %s:\n", name)
 		config += fmt.Sprintf("    enable: %v\n", plugin.Enable)
-		config += fmt.Sprintf("    period: %d\n", plugin.Period)
+		config += fmt.Sprintf("    period: %s\n", plugin.Period)
 		if plugin.PluginType != "" {
 			config += fmt.Sprintf("    type: %s\n", plugin.PluginType)
 		}
@@ -422,7 +427,7 @@ func (r *KonAgentReconciler) generateConfigContent(konAgent *corev1alpha1.KonAge
 	if konAgent.Spec.Cache != nil {
 		config += "cache:\n"
 		config += fmt.Sprintf("  path: %s\n", konAgent.Spec.Cache.Path)
-		config += fmt.Sprintf("  max-size: %d\n", konAgent.Spec.Cache.MaxSize)
+		config += fmt.Sprintf("  max_size: %s\n", konAgent.Spec.Cache.MaxSize)
 	}
 	return config
 }

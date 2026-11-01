@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.14.0
+    controller-gen.kubebuilder.io/version: v0.17.2
   name: konagents.core.konpure.com
 spec:
   group: core.konpure.com
@@ -51,6 +51,9 @@ spec:
                 type: object
               clientId:
                 type: string
+              image:
+                description: Image is the agent container image; defaults to konpure/kon-agent:latest.
+                type: string
               plugins:
                 additionalProperties:
                   description: PluginConfig defines the configuration for a specific
@@ -60,9 +63,11 @@ spec:
                       description: Enable determines whether the plugin is enabled
                       type: boolean
                     period:
-                      description: Period defines how often the plugin should run
-                      format: int64
-                      type: integer
+                      description: |-
+                        Period defines how often the plugin should run, e.g. "5s".
+                        A string is used instead of time.Duration because the CRD schema
+                        serializes Duration as raw nanoseconds, which is unreadable in a CR.
+                      type: string
                     pluginType:
                       description: PluginType specifies the type of the plugin
                       type: string
@@ -77,9 +82,15 @@ spec:
                 maximum: 10
                 minimum: 1
                 type: integer
+              server:
+                description: |-
+                  Server is the ingest endpoint the agent reports to, e.g. "quic://vm:7843".
+                  Without it the generated agent.yaml has nowhere to connect.
+                type: string
             required:
             - clientId
             - plugins
+            - server
             type: object
           status:
             description: KonAgentStatus defines the observed state of KonAgent
@@ -93,16 +104,8 @@ spec:
                 description: Conditions represent the latest available observations
                   of an object's state
                 items:
-                  description: "Condition contains details for one aspect of the current
-                    state of this API Resource.\n---\nThis struct is intended for
-                    direct use as an array at the field path .status.conditions.  For
-                    example,\n\n\n\ttype FooStatus struct{\n\t    // Represents the
-                    observations of a foo's current state.\n\t    // Known .status.conditions.type
-                    are: \"Available\", \"Progressing\", and \"Degraded\"\n\t    //
-                    +patchMergeKey=type\n\t    // +patchStrategy=merge\n\t    // +listType=map\n\t
-                    \   // +listMapKey=type\n\t    Conditions []metav1.Condition `json:\"conditions,omitempty\"
-                    patchStrategy:\"merge\" patchMergeKey:\"type\" protobuf:\"bytes,1,rep,name=conditions\"`\n\n\n\t
-                    \   // other fields\n\t}"
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
                   properties:
                     lastTransitionTime:
                       description: |-
@@ -143,12 +146,7 @@ spec:
                       - Unknown
                       type: string
                     type:
-                      description: |-
-                        type of condition in CamelCase or in foo.example.com/CamelCase.
-                        ---
-                        Many .condition.type values are consistent across resources like Available, but because arbitrary conditions can be
-                        useful (see .node.status.conditions), the ability to deconflict is important.
-                        The regex it matches is (dns1123SubdomainFmt/)?(qualifiedNameFmt)
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
                       maxLength: 316
                       pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
