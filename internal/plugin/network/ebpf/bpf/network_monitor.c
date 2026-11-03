@@ -210,27 +210,29 @@ static __always_inline void rtt_incr(__u32 key, __u64 delta) {
   }
 }
 
+// OTLP bucket i holds (bound[i-1], bound[i]] — the upper bound is inclusive,
+// so the comparisons use <= (exact-boundary samples belong to bucket i).
 static __always_inline __u32 rtt_bucket(__u64 rtt_us) {
-  if (rtt_us < 1000)
-    return 0; // < 1ms
-  if (rtt_us < 5000)
-    return 1; // < 5ms
-  if (rtt_us < 10000)
-    return 2; // < 10ms
-  if (rtt_us < 25000)
-    return 3; // < 25ms
-  if (rtt_us < 50000)
-    return 4; // < 50ms
-  if (rtt_us < 100000)
-    return 5; // < 100ms
-  if (rtt_us < 250000)
-    return 6; // < 250ms
-  if (rtt_us < 500000)
-    return 7; // < 500ms
-  if (rtt_us < 1000000)
-    return 8; // < 1s
-  if (rtt_us < 2500000)
-    return 9; // < 2.5s
+  if (rtt_us <= 1000)
+    return 0; // <= 1ms
+  if (rtt_us <= 5000)
+    return 1; // <= 5ms
+  if (rtt_us <= 10000)
+    return 2; // <= 10ms
+  if (rtt_us <= 25000)
+    return 3; // <= 25ms
+  if (rtt_us <= 50000)
+    return 4; // <= 50ms
+  if (rtt_us <= 100000)
+    return 5; // <= 100ms
+  if (rtt_us <= 250000)
+    return 6; // <= 250ms
+  if (rtt_us <= 500000)
+    return 7; // <= 500ms
+  if (rtt_us <= 1000000)
+    return 8; // <= 1s
+  if (rtt_us <= 2500000)
+    return 9; // <= 2.5s
   return RTT_BUCKET_OVERFLOW;
 }
 
