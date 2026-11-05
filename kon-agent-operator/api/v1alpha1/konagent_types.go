@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -39,9 +40,13 @@ type KonAgentSpec struct {
 	// Image is the agent container image; defaults to konpure/kon-agent:latest.
 	Image string `json:"image,omitempty"`
 
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=10
-	Replicas *int32 `json:"replicas,omitempty"`
+	// NodeSelector limits the nodes the agent DaemonSet schedules onto,
+	// e.g. {"node-role.kubernetes.io/edge": "true"}.
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations lets the agent pods schedule onto tainted nodes
+	// (e.g. dedicated edge nodes).
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
 	// add plugins config
 	// +kubebuilder:validation:Required
