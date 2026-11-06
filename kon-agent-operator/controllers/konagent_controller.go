@@ -179,6 +179,15 @@ func (r *KonAgentReconciler) buildDaemonSet(konAgent *corev1alpha1.KonAgent, con
 	}
 
 	hostPathDir := corev1.HostPathDirectory
+	hostPathDirOrCreate := corev1.HostPathDirectoryOrCreate
+
+	// The WAL (and state file) must survive pod restarts — a container-local
+	// /tmp would silently void the crash-recovery guarantee. The agent's
+	// cache path is backed by a host directory.
+	cachePath := "/tmp/edge_agent.cache"
+	if c := konAgent.Spec.Cache; c != nil && c.Path != "" {
+		cachePath = c.Path
+	}
 
 	// Rolling update trigger: when the ConfigMap content changes, the hash
 	// annotation on the pod template changes, and the DaemonSet rolls.
@@ -249,6 +258,10 @@ func (r *KonAgentReconciler) buildDaemonSet(konAgent *corev1alpha1.KonAgent, con
 									MountPath: "/host/sys",
 									ReadOnly:  true,
 								},
+								{
+									Name:      "agent-cache",
+									MountPath: cachePath,
+								},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -288,6 +301,15 @@ func (r *KonAgentReconciler) buildDaemonSet(konAgent *corev1alpha1.KonAgent, con
 								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/sys",
 									Type: &hostPathDir,
+								},
+							},
+						},
+						{
+							Name: "agent-cache",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/var/lib/kon-agent",
+									Type: &hostPathDirOrCreate,
 								},
 							},
 						},

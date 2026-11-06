@@ -1,0 +1,54 @@
+# Multi-stage build for the Kon-Agent edge agent.
+#
+# Stage 1 compiles the Go binary AND the eBPF objects. The eBPF build needs
+# clang + bpftool + the build host's kernel BTF (visible at /sys/kernel/btf in
+# build containers, which share the host kernel). vmlinux.h is only the
+# compile-time reference layout — CO-RE relocates against the RUNTIME kernel's
+# BTF, so objects built here run on other kernels.
+#
+# Stage 2 is a minimal image: static binary (CGO_ENABLED=0) + the .o objects
+# at the exact relative paths the tracers load them from.
+
+# ---------- builder ----------
+FROM golang:1.24-bookworm AS builder
+
+# Optional APT mirror for slow default sources, e.g.
+#   --build-arg APT_MIRROR=mirrors.tencentyun.com
+ARG APT_MIRROR=""
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang llvm bpftool libbpf-dev linux-libc-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Optional Go module proxy for slow default sources, e.g.
+#   --build-arg GOPROXY=https://goproxy.cn,direct
+ARG GOPROXY=""
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN if [ -n "$GOPROXY" ]; then go env -w GOPROXY="$GOPROXY"; fi && go mod download
+COPY . .
+
+RUN ./scripts/build_ebpf.sh
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+    -o /out/edge-agent ./cmd/edge-agent
+
+# ---------- runtime ----------
+FROM debian:bookworm-slim
+
+WORKDIR /app
+COPY --from=builder /out/edge-agent /app/edge-agent
+COPY --from=builder /src/internal/plugin/network/ebpf/output/network_monitor.o \
+                    /app/internal/plugin/network/ebpf/output/network_monitor.o
+COPY --from=builder /src/internal/plugin/block/ebpf/output/block_io.o \
+                    /app/internal/plugin/block/ebpf/output/block_io.o
+COPY --from=builder /src/internal/plugin/sched/ebpf/output/sched_lat.o \
+                    /app/internal/plugin/sched/ebpf/output/sched_lat.o
+COPY configs/agent.yaml /app/configs/agent.yaml
+
+# The agent needs root for eBPF (runs privileged in the DaemonSet anyway).
+ENTRYPOINT ["/app/edge-agent", "-config", "configs/agent.yaml"]

@@ -14,17 +14,17 @@ pre-commit:
 
     # 根模块 lint（golangci-lint 已内含 govet，无需单独跑 go vet）
     # --new-from-rev 只拦截本分支新引入的问题，不清理存量告警
-    # 注：ebpf 包是 cgo 包，SEC() 宏只有 clang 能编译，需与 README 构建方式一致
+    # --allow-parallel-runners：两个 lint 任务并行，需绕过 $TMPDIR/golangci-lint.lock 的全局单实例锁
     golangci-lint-root:
       glob: "*.go"
       exclude: "kon-agent-operator/"
-      run: CC=clang golangci-lint run --new-from-rev=origin/main ./...
+      run: golangci-lint run --allow-parallel-runners --new-from-rev=origin/main ./...
 
     # Operator 模块 lint
     golangci-lint-operator:
       root: "kon-agent-operator/"
       glob: "*.go"
-      run: golangci-lint run --config ../.golangci.yml --new-from-rev=origin/main ./...
+      run: golangci-lint run --allow-parallel-runners --config ../.golangci.yml --new-from-rev=origin/main ./...
 
     # 依赖整洁性：go.mod/go.sum 变更时自动 tidy
     go-mod-tidy-root:
@@ -51,10 +51,10 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
-    # 编译门禁（eBPF .o 为运行时加载，不依赖其构建产物）
-    # ebpf 包含 cgo，SEC() 宏需要 clang，与 README 构建方式一致
+    # 编译门禁（eBPF .o 为运行时加载，不依赖其构建产物；
+    # cgo 空壳已删除，全仓不再需要 C 工具链）
     build-root:
-      run: CC=clang go build ./...
+      run: go build ./...
     build-operator:
       root: "kon-agent-operator/"
       run: go build ./...
