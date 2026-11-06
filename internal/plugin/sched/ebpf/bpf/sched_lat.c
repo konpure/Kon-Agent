@@ -52,11 +52,14 @@ static __always_inline void runq_incr(__u32 key, __u64 delta) {
 }
 
 // log2 slot via shift ladder (no clzll — crashes the LLVM 14 BPF backend).
+// OTLP-conformant ceiling semantics: bucket i holds (2^(i-1), 2^i] us,
+// i.e. slot(v) = ceil(log2(v)) = floor(log2(v-1)) + 1.
 static __always_inline __u32 log2_slot(__u64 v) {
   __u32 r = 0;
-  if (v == 0) {
-    return 0;
+  if (v <= 1) {
+    return 0; // bucket 0: (-inf, 1] us
   }
+  v -= 1;
   if (v >= (1ULL << 32)) {
     v >>= 32;
     r += 32;
@@ -80,6 +83,7 @@ static __always_inline __u32 log2_slot(__u64 v) {
   if (v >= (1ULL << 1)) {
     r += 1;
   }
+  r += 1; // floor(log2(v-1)) + 1 == ceil(log2(original v))
   if (r > 21) {
     r = 21;
   }

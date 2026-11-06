@@ -45,7 +45,7 @@ type KonAgentReconciler struct {
 //+kubebuilder:rbac:groups=core.konpure.com,resources=konagents,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core.konpure.com,resources=konagents/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=core.konpure.com,resources=konagents/finalizers,verbs=update
-//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
@@ -118,35 +118,35 @@ func (r *KonAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		Message: "ConfigMap is ready",
 		Reason:  "ConfigMapReady"})
 
-	// Ensure Deployment exists
-	deployment, err := r.ensureDeployment(ctx, &konAgent, configMap)
+	// Ensure DaemonSet exists
+	daemonSet, err := r.ensureDaemonSet(ctx, &konAgent, configMap)
 	if err != nil {
-		log.Error(err, "Failed to ensure Deployment")
+		log.Error(err, "Failed to ensure DaemonSet")
 		r.updateStatus(ctx, &konAgent, metav1.Condition{
-			Type:    "DeploymentReady",
+			Type:    "DaemonSetReady",
 			Status:  metav1.ConditionFalse,
 			Message: err.Error(),
-			Reason:  "DeploymentCreationFailed"})
+			Reason:  "DaemonSetCreationFailed"})
 		return ctrl.Result{Requeue: true, RequeueAfter: 5 * time.Second}, err
 	}
 
-	// Check if Deployment is ready
-	if deployment.Status.AvailableReplicas > 0 && deployment.Status.ReadyReplicas == deployment.Status.AvailableReplicas {
-		// Update DeploymentReady status to true
+	// Check if DaemonSet is ready: all desired pods scheduled and ready.
+	if daemonSet.Status.DesiredNumberScheduled > 0 &&
+		daemonSet.Status.NumberReady == daemonSet.Status.DesiredNumberScheduled {
 		r.updateStatus(ctx, &konAgent, metav1.Condition{
-			Type:    "DeploymentReady",
+			Type:    "DaemonSetReady",
 			Status:  metav1.ConditionTrue,
-			Message: "Deployment is ready",
-			Reason:  "DeploymentReady"})
+			Message: "DaemonSet is ready",
+			Reason:  "DaemonSetReady"})
 
 		// Update the observed generation to indicate that we've processed this spec version
 		konAgent.Status.ObservedGeneration = konAgent.Generation
 	} else {
 		r.updateStatus(ctx, &konAgent, metav1.Condition{
-			Type:    "DeploymentReady",
+			Type:    "DaemonSetReady",
 			Status:  metav1.ConditionFalse,
-			Message: fmt.Sprintf("Only %d out of %d replicas are ready", deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas),
-			Reason:  "DeploymentNotReady"})
+			Message: fmt.Sprintf("Only %d out of %d pods are ready", daemonSet.Status.NumberReady, daemonSet.Status.DesiredNumberScheduled),
+			Reason:  "DaemonSetNotReady"})
 		return ctrl.Result{Requeue: true, RequeueAfter: 2 * time.Second}, nil
 	}
 
@@ -159,24 +159,34 @@ func (r *KonAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return ctrl.Result{}, nil
 }
 
-func (r *KonAgentReconciler) buildDeployment(konAgent *corev1alpha1.KonAgent, configMap *corev1.ConfigMap) *appsv1.Deployment {
-	// Define the desired Deployment
-	replicas := int32(1)
-	if konAgent.Spec.Replicas != nil {
-		replicas = *konAgent.Spec.Replicas
+// buildDaemonSet renders the desired DaemonSet for one KonAgent CR.
+//
+// The pod spec reflects the agent's eBPF collector nature:
+//   - privileged: loading BPF programs and attaching XDP/kprobes/tracepoints
+//     all require it (a fine-grained CAP_BPF/CAP_SYS_ADMIN alternative is
+//     noted in the docs but needs a newer kernel's BPF token model);
+//   - hostNetwork: XDP attaches to the host NIC and all network metrics must
+//     describe the host namespace, not the pod's;
+//   - /proc and /sys hostPath mounts: the /proc plugins read system stats and
+//     CO-RE relocation needs /sys/kernel/btf plus /sys/dev/block symlinks.
+func (r *KonAgentReconciler) buildDaemonSet(konAgent *corev1alpha1.KonAgent, configMap *corev1.ConfigMap) *appsv1.DaemonSet {
+	image := konAgent.Spec.Image
+	if image == "" {
+		image = "konpure/kon-agent:latest"
 	}
 
-	return &appsv1.Deployment{
+	hostPathDir := corev1.HostPathDirectory
+
+	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-deployment", konAgent.Name),
+			Name:      fmt.Sprintf("%s-agent", konAgent.Name),
 			Namespace: konAgent.Namespace,
 			Labels: map[string]string{
 				"app":      "kon-agent",
 				"instance": konAgent.Name,
 			},
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
+		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app":      "kon-agent",
@@ -191,20 +201,43 @@ func (r *KonAgentReconciler) buildDeployment(konAgent *corev1alpha1.KonAgent, co
 					},
 				},
 				Spec: corev1.PodSpec{
+					HostNetwork:   true,
+					NodeSelector:  konAgent.Spec.NodeSelector,
+					Tolerations:   konAgent.Spec.Tolerations,
+					RestartPolicy: corev1.RestartPolicyAlways,
 					Containers: []corev1.Container{
 						{
 							Name:  "kon-agent",
-							Image: "konpure/kon-agent:latest",
+							Image: image,
 							Command: []string{
 								"./edge-agent",
 							},
 							Args: []string{
 								fmt.Sprintf("--config=%s", "/etc/kon-agent/agent.yaml"),
 							},
+							Env: []corev1.EnvVar{
+								// gopsutil-based plugins read the host's procfs/sysfs
+								// via these (node_exporter-style convention).
+								{Name: "HOST_PROC", Value: "/host/proc"},
+								{Name: "HOST_SYS", Value: "/host/sys"},
+							},
+							SecurityContext: &corev1.SecurityContext{
+								Privileged: ptr(true),
+							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "config-volume",
 									MountPath: "/etc/kon-agent",
+								},
+								{
+									Name:      "proc",
+									MountPath: "/host/proc",
+									ReadOnly:  true,
+								},
+								{
+									Name:      "sys",
+									MountPath: "/host/sys",
+									ReadOnly:  true,
 								},
 							},
 							Resources: corev1.ResourceRequirements{
@@ -230,6 +263,24 @@ func (r *KonAgentReconciler) buildDeployment(konAgent *corev1alpha1.KonAgent, co
 								},
 							},
 						},
+						{
+							Name: "proc",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/proc",
+									Type: &hostPathDir,
+								},
+							},
+						},
+						{
+							Name: "sys",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/sys",
+									Type: &hostPathDir,
+								},
+							},
+						},
 					},
 				},
 			},
@@ -237,72 +288,53 @@ func (r *KonAgentReconciler) buildDeployment(konAgent *corev1alpha1.KonAgent, co
 	}
 }
 
-func (r *KonAgentReconciler) ensureDeployment(ctx context.Context, konAgent *corev1alpha1.KonAgent, configMap *corev1.ConfigMap) (*appsv1.Deployment, error) {
+func ptr(b bool) *bool { return &b }
+
+func (r *KonAgentReconciler) ensureDaemonSet(ctx context.Context, konAgent *corev1alpha1.KonAgent, configMap *corev1.ConfigMap) (*appsv1.DaemonSet, error) {
 	log := log.FromContext(ctx)
 
-	deploymentName := fmt.Sprintf("%s-deployment", konAgent.Name)
+	daemonSetName := fmt.Sprintf("%s-agent", konAgent.Name)
 	namespace := konAgent.Namespace
 
-	// Check if Deployment exists
-	var existingDeployment appsv1.Deployment
+	// Check if DaemonSet exists
+	var existingDaemonSet appsv1.DaemonSet
 	err := r.Get(ctx, types.NamespacedName{
-		Name:      deploymentName,
+		Name:      daemonSetName,
 		Namespace: namespace,
-	}, &existingDeployment)
+	}, &existingDaemonSet)
 
-	// Define the desired Deployment
-	desiredDeploy := r.buildDeployment(konAgent, configMap)
+	// Define the desired DaemonSet
+	desiredDaemonSet := r.buildDaemonSet(konAgent, configMap)
 
 	if err != nil {
 		if errors.IsNotFound(err) {
-			// Create new Deployment
-			if err := ctrl.SetControllerReference(konAgent, desiredDeploy, r.Scheme); err != nil {
+			// Create new DaemonSet
+			if err := ctrl.SetControllerReference(konAgent, desiredDaemonSet, r.Scheme); err != nil {
 				return nil, err
 			}
 
-			if err := r.Create(ctx, desiredDeploy); err != nil {
-				log.Error(err, "Failed to create Deployment")
+			if err := r.Create(ctx, desiredDaemonSet); err != nil {
+				log.Error(err, "Failed to create DaemonSet")
 				return nil, err
 			}
-			log.Info("Created Deployment", "name", desiredDeploy.Name, "namespace", desiredDeploy.Namespace)
-			return desiredDeploy, nil
+			log.Info("Created DaemonSet", "name", desiredDaemonSet.Name, "namespace", desiredDaemonSet.Namespace)
+			return desiredDaemonSet, nil
 		}
 		return nil, err
 	}
-	// Update existing Deployment if needed
-	needsUpdate := false
 
-	// Check if replicas has changed with nil pointer check
-	existingReplicas := int32(1)
-	desiredReplicas := int32(1)
-
-	if existingDeployment.Spec.Replicas != nil {
-		existingReplicas = *existingDeployment.Spec.Replicas
-	}
-	if desiredDeploy.Spec.Replicas != nil {
-		desiredReplicas = *desiredDeploy.Spec.Replicas
-	}
-
-	if existingReplicas != desiredReplicas {
-		existingDeployment.Spec.Replicas = &desiredReplicas
-		needsUpdate = true
-	}
-
-	// Check if pod template has changed
-	if !r.podTemplatesEqual(existingDeployment.Spec.Template, desiredDeploy.Spec.Template) {
-		existingDeployment.Spec.Template = desiredDeploy.Spec.Template
-		needsUpdate = true
-	}
-
-	if needsUpdate {
-		if err := r.Update(ctx, &existingDeployment); err != nil {
-			log.Error(err, "Failed to update Deployment")
+	// Update existing DaemonSet if the pod template has changed
+	// (DaemonSet has no replica count to reconcile — every node gets one pod).
+	if !r.podTemplatesEqual(existingDaemonSet.Spec.Template, desiredDaemonSet.Spec.Template) {
+		existingDaemonSet.Spec.Template = desiredDaemonSet.Spec.Template
+		if err := r.Update(ctx, &existingDaemonSet); err != nil {
+			log.Error(err, "Failed to update DaemonSet")
 			return nil, err
 		}
-		log.Info("Updated Deployment", "name", existingDeployment.Name, "namespace", existingDeployment.Namespace)
+		log.Info("Updated DaemonSet", "name", existingDaemonSet.Name, "namespace", existingDaemonSet.Namespace)
 	}
 
-	return &existingDeployment, nil
+	return &existingDaemonSet, nil
 }
 
 func (r *KonAgentReconciler) podTemplatesEqual(existing, desired corev1.PodTemplateSpec) bool {
@@ -406,15 +438,15 @@ func (r *KonAgentReconciler) ensureConfigMap(ctx context.Context, konAgent *core
 }
 
 func (r *KonAgentReconciler) generateConfigContent(konAgent *corev1alpha1.KonAgent) string {
-	// This function generates the agent.yaml content based on the KonAgent spec
-	// You'll need to implement this according to your configuration format
-	// This is a simplified example
-	config := fmt.Sprintf("client-id: %s\n", konAgent.Spec.ClientId)
+	// Generate agent.yaml content from the KonAgent spec. Keys must match the
+	// agent's config loader (kebab-case client-id, snake_case max_size).
+	config := fmt.Sprintf("server: %s\n", konAgent.Spec.Server)
+	config += fmt.Sprintf("client-id: %s\n", konAgent.Spec.ClientId)
 	config += "plugins:\n"
 	for name, plugin := range konAgent.Spec.Plugins {
 		config += fmt.Sprintf("  %s:\n", name)
 		config += fmt.Sprintf("    enable: %v\n", plugin.Enable)
-		config += fmt.Sprintf("    period: %d\n", plugin.Period)
+		config += fmt.Sprintf("    period: %s\n", plugin.Period)
 		if plugin.PluginType != "" {
 			config += fmt.Sprintf("    type: %s\n", plugin.PluginType)
 		}
@@ -422,7 +454,7 @@ func (r *KonAgentReconciler) generateConfigContent(konAgent *corev1alpha1.KonAge
 	if konAgent.Spec.Cache != nil {
 		config += "cache:\n"
 		config += fmt.Sprintf("  path: %s\n", konAgent.Spec.Cache.Path)
-		config += fmt.Sprintf("  max-size: %d\n", konAgent.Spec.Cache.MaxSize)
+		config += fmt.Sprintf("  max_size: %s\n", konAgent.Spec.Cache.MaxSize)
 	}
 	return config
 }
@@ -431,7 +463,7 @@ func (r *KonAgentReconciler) generateConfigContent(konAgent *corev1alpha1.KonAge
 func (r *KonAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.KonAgent{}).
-		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.DaemonSet{}).
 		Owns(&corev1.ConfigMap{}).
 		Complete(r)
 }
@@ -523,22 +555,22 @@ func (r *KonAgentReconciler) finalizeKonAgent(ctx context.Context, konAgent *cor
 		return err
 	}
 
-	deploymentName := fmt.Sprintf("%s-deployment", konAgent.Name)
-	deployment := &appsv1.Deployment{}
+	daemonSetName := fmt.Sprintf("%s-agent", konAgent.Name)
+	daemonSet := &appsv1.DaemonSet{}
 	err = r.Get(ctx, types.NamespacedName{
-		Name:      deploymentName,
+		Name:      daemonSetName,
 		Namespace: konAgent.Namespace,
-	}, deployment)
+	}, daemonSet)
 
 	if err == nil {
-		// Deployment exists
-		log.Info("Deleting deployment during finalization", "name", deployment.Name, "namespace", deployment.Namespace)
-		if deleteerr := r.Delete(ctx, deployment); deleteerr != nil {
-			log.Error(deleteerr, "Failed to delete Deployment", "name", deployment.Name, "namespace", deployment.Namespace)
+		// DaemonSet exists
+		log.Info("Deleting daemonSet during finalization", "name", daemonSet.Name, "namespace", daemonSet.Namespace)
+		if deleteerr := r.Delete(ctx, daemonSet); deleteerr != nil {
+			log.Error(deleteerr, "Failed to delete DaemonSet", "name", daemonSet.Name, "namespace", daemonSet.Namespace)
 			return deleteerr
 		}
 	} else if !errors.IsNotFound(err) {
-		log.Error(err, "Error checking Deployment existence", "name", deploymentName, "namespace", konAgent.Namespace)
+		log.Error(err, "Error checking DaemonSet existence", "name", daemonSetName, "namespace", konAgent.Namespace)
 		return err
 	}
 

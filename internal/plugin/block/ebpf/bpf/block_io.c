@@ -84,15 +84,19 @@ static __always_inline void record_issue(struct request *rq) {
   bpf_map_update_elem(&io_start, &rq, &v, BPF_ANY);
 }
 
-// log2 slot for a microsecond value: slot i holds (2^(i-1), 2^i] us.
+// log2 slot for a microsecond value, OTLP-conformant: bucket i holds
+// (2^(i-1), 2^i] us, i.e. slot(v) = ceil(log2(v)), computed as
+// floor(log2(v-1)) + 1. (The previous floor version under-reported every
+// non-power-of-two sample by one bucket.)
 // NB: no __builtin_clzll — it crashes the LLVM 14 BPF backend in DAG
 // instruction selection (no native CTLZ on BPF). The shift ladder is also
 // verifier-friendly: fixed instruction count, no loops.
 static __always_inline __u32 log2_slot(__u64 v) {
   __u32 r = 0;
-  if (v == 0) {
-    return 0;
+  if (v <= 1) {
+    return 0; // bucket 0: (-inf, 1] us
   }
+  v -= 1;
   if (v >= (1ULL << 32)) {
     v >>= 32;
     r += 32;
@@ -116,6 +120,7 @@ static __always_inline __u32 log2_slot(__u64 v) {
   if (v >= (1ULL << 1)) {
     r += 1;
   }
+  r += 1; // floor(log2(v-1)) + 1 == ceil(log2(original v))
   if (r > 27) {
     r = 27;
   }

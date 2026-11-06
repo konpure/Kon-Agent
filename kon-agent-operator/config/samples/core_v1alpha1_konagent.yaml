@@ -9,14 +9,33 @@ metadata:
     app.kubernetes.io/created-by: kon-agent-operator
   name: konagent-sample
 spec:
-  # TODO(user): Add fields here
   clientId: "edge-agent-1"
-  replicas: 1
+  server: "quic://localhost:7843"
+  image: "konpure/kon-agent:latest"
+  # nodeSelector limits scheduling to edge node groups, e.g.:
+  # nodeSelector:
+  #   node-role.kubernetes.io/edge: "true"
+  # tolerations:
+  #   - key: node-role.kubernetes.io/edge
+  #     operator: Exists
+  #     effect: NoSchedule
   plugins:
     cpu:
       enable: true
       period: 5s
+    memory:
+      enable: true
+      period: 5s
+    disk:
+      enable: true
+      period: 5s
     ebpf:
+      enable: true
+      period: 5s
+    ebpf_block:
+      enable: true
+      period: 5s
+    ebpf_sched:
       enable: true
       period: 5s
   cache:
