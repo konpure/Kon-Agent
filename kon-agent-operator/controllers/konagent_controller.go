@@ -262,6 +262,14 @@ func (r *KonAgentReconciler) buildDaemonSet(konAgent *corev1alpha1.KonAgent, con
 									Name:      "agent-cache",
 									MountPath: cachePath,
 								},
+								{
+									// tracepoint attach (sched/tcp/skb) goes
+									// through tracefs; containers get a fresh
+									// sysfs without it, so mount the host's.
+									Name:      "tracefs",
+									MountPath: "/sys/kernel/tracing",
+									ReadOnly:  true,
+								},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -310,6 +318,15 @@ func (r *KonAgentReconciler) buildDaemonSet(konAgent *corev1alpha1.KonAgent, con
 								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/var/lib/kon-agent",
 									Type: &hostPathDirOrCreate,
+								},
+							},
+						},
+						{
+							Name: "tracefs",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/sys/kernel/tracing",
+									Type: &hostPathDir,
 								},
 							},
 						},

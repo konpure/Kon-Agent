@@ -1,9 +1,11 @@
 package security
 
 import (
+	"errors"
 	"fmt"
 	"github.com/syndtr/gocapability/capability"
 	"golang.org/x/sys/unix"
+	"log/slog"
 	"syscall"
 )
 
@@ -47,7 +49,15 @@ func DropPrivileges() error {
 	// }
 
 	if err := syscall.Setpgid(0, 0); err != nil {
-		return fmt.Errorf("failed to set pgid: %v", err)
+		// A session leader cannot change its own process group (EPERM) —
+		// expected when running as PID 1 in a container. This is process
+		// hygiene, not a privilege boundary, so tolerate only that case;
+		// any other failure still surfaces (bare-metal behavior preserved).
+		if errors.Is(err, unix.EPERM) {
+			slog.Debug("setpgid skipped (session leader, e.g. container PID 1)")
+		} else {
+			return fmt.Errorf("failed to set pgid: %w", err)
+		}
 	}
 
 	unix.Umask(0o077)
