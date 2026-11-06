@@ -18,6 +18,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -26,6 +28,7 @@ import (
 	"reflect"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -177,6 +180,10 @@ func (r *KonAgentReconciler) buildDaemonSet(konAgent *corev1alpha1.KonAgent, con
 
 	hostPathDir := corev1.HostPathDirectory
 
+	// Rolling update trigger: when the ConfigMap content changes, the hash
+	// annotation on the pod template changes, and the DaemonSet rolls.
+	configHash := sha256.Sum256([]byte(configMap.Data["agent.yaml"]))
+
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-agent", konAgent.Name),
@@ -198,6 +205,9 @@ func (r *KonAgentReconciler) buildDaemonSet(konAgent *corev1alpha1.KonAgent, con
 					Labels: map[string]string{
 						"app":      "kon-agent",
 						"instance": konAgent.Name,
+					},
+					Annotations: map[string]string{
+						"konpure.com/config-hash": hex.EncodeToString(configHash[:]),
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -381,11 +391,14 @@ func (r *KonAgentReconciler) ensureConfigMap(ctx context.Context, konAgent *core
 	namespace := konAgent.Namespace
 
 	// Generate agent.yaml content
-	configContent := r.generateConfigContent(konAgent)
+	configContent, err := r.generateConfigContent(konAgent)
+	if err != nil {
+		return nil, err
+	}
 
 	// Check if ConfigMap exists
 	var existingCM corev1.ConfigMap
-	err := r.Get(ctx, types.NamespacedName{
+	err = r.Get(ctx, types.NamespacedName{
 		Name:      configMapName,
 		Namespace: namespace,
 	}, &existingCM)
@@ -437,26 +450,85 @@ func (r *KonAgentReconciler) ensureConfigMap(ctx context.Context, konAgent *core
 	return &existingCM, nil
 }
 
-func (r *KonAgentReconciler) generateConfigContent(konAgent *corev1alpha1.KonAgent) string {
-	// Generate agent.yaml content from the KonAgent spec. Keys must match the
-	// agent's config loader (kebab-case client-id, snake_case max_size).
-	config := fmt.Sprintf("server: %s\n", konAgent.Spec.Server)
-	config += fmt.Sprintf("client-id: %s\n", konAgent.Spec.ClientId)
-	config += "plugins:\n"
-	for name, plugin := range konAgent.Spec.Plugins {
-		config += fmt.Sprintf("  %s:\n", name)
-		config += fmt.Sprintf("    enable: %v\n", plugin.Enable)
-		config += fmt.Sprintf("    period: %s\n", plugin.Period)
-		if plugin.PluginType != "" {
-			config += fmt.Sprintf("    type: %s\n", plugin.PluginType)
+// agentConfig mirrors the agent's config loader schema; yaml tags must match
+// it exactly (kebab-case client-id, snake_case max_size, etc).
+type agentConfig struct {
+	Server   string                 `yaml:"server"`
+	ClientID string                 `yaml:"client-id"`
+	Codec    string                 `yaml:"codec,omitempty"`
+	Plugins  map[string]pluginEntry `yaml:"plugins"`
+	Cache    *cacheSection          `yaml:"cache,omitempty"`
+	WAL      *walSection            `yaml:"wal,omitempty"`
+	Sampling *samplingSection       `yaml:"sampling,omitempty"`
+}
+
+type pluginEntry struct {
+	Enable bool   `yaml:"enable"`
+	Period string `yaml:"period"`
+	Type   string `yaml:"type,omitempty"`
+}
+
+type cacheSection struct {
+	Path    string `yaml:"path"`
+	MaxSize string `yaml:"max_size"`
+}
+
+type walSection struct {
+	Enable        bool   `yaml:"enable"`
+	Dir           string `yaml:"dir,omitempty"`
+	SegmentSize   string `yaml:"segment_size,omitempty"`
+	MaxSize       string `yaml:"max_size,omitempty"`
+	FsyncInterval string `yaml:"fsync_interval,omitempty"`
+}
+
+type samplingSection struct {
+	Mode           string `yaml:"mode,omitempty"`
+	SummaryWindow  string `yaml:"summary_window,omitempty"`
+	DegradedWindow string `yaml:"degraded_window,omitempty"`
+}
+
+// generateConfigContent renders agent.yaml from the KonAgent spec by
+// marshaling a structured value — no hand-rolled string concatenation, so
+// key/format bugs of the previous implementation cannot reoccur.
+func (r *KonAgentReconciler) generateConfigContent(konAgent *corev1alpha1.KonAgent) (string, error) {
+	cfg := agentConfig{
+		Server:   konAgent.Spec.Server,
+		ClientID: konAgent.Spec.ClientId,
+		Codec:    konAgent.Spec.Codec,
+		Plugins:  make(map[string]pluginEntry, len(konAgent.Spec.Plugins)),
+	}
+	for name, p := range konAgent.Spec.Plugins {
+		cfg.Plugins[name] = pluginEntry{
+			Enable: p.Enable,
+			Period: p.Period,
+			Type:   p.PluginType,
 		}
 	}
-	if konAgent.Spec.Cache != nil {
-		config += "cache:\n"
-		config += fmt.Sprintf("  path: %s\n", konAgent.Spec.Cache.Path)
-		config += fmt.Sprintf("  max_size: %s\n", konAgent.Spec.Cache.MaxSize)
+	if c := konAgent.Spec.Cache; c != nil {
+		cfg.Cache = &cacheSection{Path: c.Path, MaxSize: c.MaxSize}
 	}
-	return config
+	if w := konAgent.Spec.WAL; w != nil {
+		cfg.WAL = &walSection{
+			Enable:        w.Enable,
+			Dir:           w.Dir,
+			SegmentSize:   w.SegmentSize,
+			MaxSize:       w.MaxSize,
+			FsyncInterval: w.FsyncInterval,
+		}
+	}
+	if s := konAgent.Spec.Sampling; s != nil {
+		cfg.Sampling = &samplingSection{
+			Mode:           s.Mode,
+			SummaryWindow:  s.SummaryWindow,
+			DegradedWindow: s.DegradedWindow,
+		}
+	}
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal agent config: %w", err)
+	}
+	return string(out), nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

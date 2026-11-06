@@ -51,6 +51,11 @@ spec:
                 type: object
               clientId:
                 type: string
+              codec:
+                description: |-
+                  Codec selects the wire encoding: gorilla | snappy | raw
+                  (defaults to gorilla on the agent).
+                type: string
               image:
                 description: Image is the agent container image; defaults to konpure/kon-agent:latest.
                 type: string
@@ -83,6 +88,21 @@ spec:
                   - period
                   type: object
                 description: add plugins config
+                type: object
+              sampling:
+                description: Sampling configures downsampling; mirrors the agent's
+                  sampling section.
+                properties:
+                  degradedWindow:
+                    description: DegradedWindow under WAL backpressure, e.g. "30s"
+                    type: string
+                  mode:
+                    description: 'Mode: off | auto (degrade on WAL backpressure) |
+                      always (weak-network summary)'
+                    type: string
+                  summaryWindow:
+                    description: SummaryWindow for mode=always, e.g. "1m"
+                    type: string
                 type: object
               server:
                 description: |-
@@ -130,6 +150,29 @@ spec:
                       type: string
                   type: object
                 type: array
+              wal:
+                description: WAL configures the write-ahead log; mirrors the agent's
+                  wal section.
+                properties:
+                  dir:
+                    description: Dir stores the WAL segments; defaults to <cache path>/wal
+                    type: string
+                  enable:
+                    description: Enable toggles the WAL (durable queue between pipeline
+                      and exporter)
+                    type: boolean
+                  fsyncInterval:
+                    description: FsyncInterval between fsyncs, e.g. "1s"
+                    type: string
+                  maxSize:
+                    description: MaxSize caps total WAL disk usage, e.g. "128MB"
+                    type: string
+                  segmentSize:
+                    description: SegmentSize per WAL segment file, e.g. "16MB"
+                    type: string
+                required:
+                - enable
+                type: object
             required:
             - clientId
             - plugins

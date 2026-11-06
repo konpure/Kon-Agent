@@ -52,6 +52,16 @@ type KonAgentSpec struct {
 	// +kubebuilder:validation:Required
 	Plugins map[string]PluginConfig `json:"plugins"`
 
+	// Codec selects the wire encoding: gorilla | snappy | raw
+	// (defaults to gorilla on the agent).
+	Codec string `json:"codec,omitempty"`
+
+	// WAL configures the write-ahead log; mirrors the agent's wal section.
+	WAL *WALConfig `json:"wal,omitempty"`
+
+	// Sampling configures downsampling; mirrors the agent's sampling section.
+	Sampling *SamplingConfig `json:"sampling,omitempty"`
+
 	// Cache configuration
 	Cache *CacheConfig `json:"cache,omitempty"`
 }
@@ -79,6 +89,37 @@ type CacheConfig struct {
 
 	// MaxSize defines the maximum size of the cache
 	MaxSize string `json:"maxSize,omitempty"`
+}
+
+// WALConfig mirrors the agent's write-ahead log configuration.
+type WALConfig struct {
+	// Enable toggles the WAL (durable queue between pipeline and exporter)
+	// +kubebuilder:validation:Required
+	Enable bool `json:"enable"`
+
+	// Dir stores the WAL segments; defaults to <cache path>/wal
+	Dir string `json:"dir,omitempty"`
+
+	// SegmentSize per WAL segment file, e.g. "16MB"
+	SegmentSize string `json:"segmentSize,omitempty"`
+
+	// MaxSize caps total WAL disk usage, e.g. "128MB"
+	MaxSize string `json:"maxSize,omitempty"`
+
+	// FsyncInterval between fsyncs, e.g. "1s"
+	FsyncInterval string `json:"fsyncInterval,omitempty"`
+}
+
+// SamplingConfig mirrors the agent's downsampling configuration.
+type SamplingConfig struct {
+	// Mode: off | auto (degrade on WAL backpressure) | always (weak-network summary)
+	Mode string `json:"mode,omitempty"`
+
+	// SummaryWindow for mode=always, e.g. "1m"
+	SummaryWindow string `json:"summaryWindow,omitempty"`
+
+	// DegradedWindow under WAL backpressure, e.g. "30s"
+	DegradedWindow string `json:"degradedWindow,omitempty"`
 }
 
 // KonAgentStatus defines the observed state of KonAgent
