@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"reflect"
+	"sort"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -153,6 +154,12 @@ func (r *KonAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{Requeue: true, RequeueAfter: 2 * time.Second}, nil
 	}
 
+	// Update KonAgent status: plugins are derived from the spec (the
+	// declarative source of truth); the heartbeat marks the last successful
+	// reconcile.
+	konAgent.Status.ActivePlugins = activePluginNames(&konAgent.Spec)
+	konAgent.Status.LastHeartbeatTime = metav1.Now()
+
 	// Update KonAgent status
 	if err := r.Status().Update(ctx, &konAgent); err != nil {
 		log.Error(err, "Failed to update KonAgent status")
@@ -160,6 +167,18 @@ func (r *KonAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// activePluginNames returns the sorted names of enabled plugins.
+func activePluginNames(spec *corev1alpha1.KonAgentSpec) []string {
+	var names []string
+	for name, p := range spec.Plugins {
+		if p.Enable {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // buildDaemonSet renders the desired DaemonSet for one KonAgent CR.
