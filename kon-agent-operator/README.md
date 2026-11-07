@@ -1,94 +1,57 @@
 # kon-agent-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+Kon-Agent 边缘监控 agent 的 Kubernetes operator：通过 `KonAgent` CR 声明式管理节点级采集 agent 的部署与配置。
 
-## Getting Started
-You’ll need a Kubernetes cluster to run against. You can use [KIND](https://sigs.k8s.io/kind) to get a local cluster for testing, or run against a remote cluster.
-**Note:** Your controller will automatically use the current context in your kubeconfig file (i.e. whatever cluster `kubectl cluster-info` shows).
+## 工作原理
 
-### Running on the cluster
-1. Install Instances of Custom Resources:
-
-```sh
-kubectl apply -f config/samples/
+```
+KonAgent CR  →  reconcile  →  ConfigMap(agent.yaml)  →  DaemonSet(每节点一个 agent pod)
+                              （配置变更经 config-hash 注解触发滚动）
 ```
 
-2. Build and push your image to the location specified by `IMG`:
+- **DaemonSet 模型**：节点级监控组件每节点恰好一个 pod，`nodeSelector`/`tolerations` 支持边缘节点分组调度
+- **特权容器**：agent 使用 eBPF（XDP/kprobe/tracepoint），pod 以 `privileged` + `hostNetwork` 运行，挂载宿主机 `/proc`、`/sys`、`tracefs` 与持久化缓存目录（WAL 数据跨 pod 重启保留）
+- **配置即事实源**：CR 变更 → operator 渲染新的 agent.yaml → ConfigMap → config-hash 变化 → DaemonSet 滚动重启
+
+## KonAgent CRD 字段
+
+| 字段 | 说明 |
+|------|------|
+| `spec.clientId` | agent 标识（必填） |
+| `spec.server` | 上报端点，如 `quic://vm:7843`（必填） |
+| `spec.image` | agent 镜像，默认 `konpure/kon-agent:latest` |
+| `spec.plugins` | 插件开关与采集周期：`enable`/`period`(如 `5s`)/`pluginType` |
+| `spec.codec` | 线序编码：`gorilla`（默认）/`snappy`/`raw` |
+| `spec.wal` | 本地 WAL：`enable`/`dir`/`segmentSize`/`maxSize`/`fsyncInterval` |
+| `spec.sampling` | 降采样：`mode`(off/auto/always)/`summaryWindow`/`degradedWindow` |
+| `spec.cache` | 缓存目录与上限 |
+| `spec.nodeSelector` / `spec.tolerations` | 调度约束 |
+
+status 回写：`activePlugins`（由 spec 推导）、`lastHeartbeatTime`、conditions（`ConfigReady`/`DaemonSetReady`）。
+
+## 部署
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/kon-agent-operator:tag
-```
-
-3. Deploy the controller to the cluster with the image specified by `IMG`:
-
-```sh
-make deploy IMG=<some-registry>/kon-agent-operator:tag
-```
-
-### Uninstall CRDs
-To delete the CRDs from the cluster:
-
-```sh
-make uninstall
-```
-
-### Undeploy controller
-UnDeploy the controller from the cluster:
-
-```sh
-make undeploy
-```
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-### How it works
-This project aims to follow the Kubernetes [Operator pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/).
-
-It uses [Controllers](https://kubernetes.io/docs/concepts/architecture/controller/),
-which provide a reconcile function responsible for synchronizing resources until the desired state is reached on the cluster.
-
-### Test It Out
-1. Install the CRDs into the cluster:
-
-```sh
+# 1. 安装 CRD 与 operator（需先有 agent 镜像，见根目录 Dockerfile.agent）
 make install
+make docker-build docker-push IMG=<registry>/kon-agent-operator:tag
+make deploy IMG=<registry>/kon-agent-operator:tag
+
+# 2. 创建 CR
+kubectl apply -f config/samples/core_v1alpha1_konagent.yaml
+
+# 3. 查看状态
+kubectl get konagent -o wide
+kubectl get daemonset -A
 ```
 
-2. Run your controller (this will run in the foreground, so switch to a new terminal if you want to leave it running):
+## 开发
 
 ```sh
-make run
+make manifests generate   # 修改 api/ 后重新生成 CRD 与 deepcopy
+go test ./controllers/    # 渲染单测（无集群依赖）；envtest 套件需 KUBEBUILDER_ASSETS
 ```
-
-**NOTE:** You can also run this in one step by running: `make install run`
-
-### Modifying the API definitions
-If you are editing the API definitions, generate the manifests such as CRs or CRDs using:
-
-```sh
-make manifests
-```
-
-**NOTE:** Run `make --help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
 
 ## License
 
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Copyright 2025. Licensed under the Apache License, Version 2.0.

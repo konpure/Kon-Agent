@@ -12,6 +12,17 @@ spec:
   clientId: "edge-agent-1"
   server: "quic://localhost:7843"
   image: "konpure/kon-agent:latest"
+  codec: gorilla
+  wal:
+    enable: true
+    dir: /tmp/edge_agent.cache/wal
+    segmentSize: 16MB
+    maxSize: 128MB
+    fsyncInterval: 1s
+  sampling:
+    mode: auto
+    summaryWindow: 1m
+    degradedWindow: 30s
   # nodeSelector limits scheduling to edge node groups, e.g.:
   # nodeSelector:
   #   node-role.kubernetes.io/edge: "true"

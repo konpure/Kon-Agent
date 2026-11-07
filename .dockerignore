@@ -1,0 +1,7 @@
+.git
+.edge-agent
+edge-agent
+kon-agent-operator/bin
+local_documents
+docs
+*.log
