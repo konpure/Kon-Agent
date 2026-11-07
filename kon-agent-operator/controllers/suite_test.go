@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -42,6 +43,14 @@ var k8sClient client.Client
 var testEnv *envtest.Environment
 
 func TestAPIs(t *testing.T) {
+	// envtest needs kubebuilder assets (etcd/kube-apiserver binaries) which
+	// are absent on lightweight machines; skip there. Pure rendering tests
+	// live in konagent_controller_test.go and need no cluster.
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		if _, err := os.Stat("/usr/local/kubebuilder/bin"); os.IsNotExist(err) {
+			t.Skip("envtest binaries not available (set KUBEBUILDER_ASSETS)")
+		}
+	}
 	RegisterFailHandler(Fail)
 
 	RunSpecs(t, "Controller Suite")
