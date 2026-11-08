@@ -1,0 +1,293 @@
+{
+  "uid": "kon-golden-signals",
+  "title": "Kon-Agent 黄金信号（Golden Signals）",
+  "description": "按 Google SRE 四黄金信号分栏：Traffic 流量 / Latency 延迟 / Errors 错误 / Saturation 饱和度。数据来自 Kon-Agent eBPF+proc 采集端，经 kon-agent-server 写入 VictoriaMetrics。",
+  "tags": ["kon-agent", "golden-signals", "ebpf"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "annotations": { "list": [] },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "agent_id",
+        "label": "采集端",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+        "query": { "query": "label_values(cpu_usage_percent, agent_id)", "refId": "StandardVariableQuery" },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+      }
+    ]
+  },
+  "panels": [
+    { "type": "row", "title": "Traffic 流量", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false, "panels": [] },
+
+    {
+      "id": 1, "type": "timeseries", "title": "网络吞吐",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id, direction) (rate(network_bytes_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}} {{direction}}"
+        }
+      ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "网络包速率",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "pps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id, protocol) (rate(network_packets_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}} {{protocol}}"
+        }
+      ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "磁盘 IO 吞吐",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id) (rate(disk_io_read_bytes_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}} read"
+        },
+        {
+          "refId": "B", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id) (rate(disk_io_write_bytes_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}} write"
+        }
+      ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "磁盘 IO 完成速率（eBPF 按设备）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "iops", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id, device) (rate(disk_io_completed_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}} {{device}}"
+        }
+      ]
+    },
+
+    { "type": "row", "title": "Latency 延迟", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }, "collapsed": false, "panels": [] },
+
+    {
+      "id": 5, "type": "timeseries", "title": "TCP RTT 分位数（eBPF）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "histogram_quantile(0.99, sum by (le, agent_id) (rate(tcp_rtt_seconds_bucket{agent_id=~\"$agent_id\"}[5m])))",
+          "legendFormat": "{{agent_id}} p99"
+        },
+        {
+          "refId": "B", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "histogram_quantile(0.95, sum by (le, agent_id) (rate(tcp_rtt_seconds_bucket{agent_id=~\"$agent_id\"}[5m])))",
+          "legendFormat": "{{agent_id}} p95"
+        }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "磁盘 IO 延迟 p99（eBPF，按读写）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "histogram_quantile(0.99, sum by (le, agent_id, rw) (rate(disk_io_latency_seconds_bucket{agent_id=~\"$agent_id\"}[5m])))",
+          "legendFormat": "{{agent_id}} {{rw}}"
+        }
+      ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "CPU 运行队列等待 p99（eBPF）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "histogram_quantile(0.99, sum by (le, agent_id) (rate(cpu_runqueue_wait_seconds_bucket{agent_id=~\"$agent_id\"}[5m])))",
+          "legendFormat": "{{agent_id}} p99"
+        }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "平均网络包长",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id) (rate(network_packet_size_bytes_sum{agent_id=~\"$agent_id\"}[5m])) / sum by (agent_id) (rate(network_packet_size_bytes_count{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}}"
+        }
+      ]
+    },
+
+    { "type": "row", "title": "Errors 错误", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 }, "collapsed": false, "panels": [] },
+
+    {
+      "id": 9, "type": "timeseries", "title": "TCP 重传速率（eBPF）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id) (rate(tcp_retransmissions_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}}"
+        }
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "内核丢包速率（eBPF，按原因）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "fieldConfig": { "defaults": { "unit": "pps", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id, reason) (rate(packet_drops_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "TCP 连接（eBPF）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id) (rate(tcp_connections_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}} 新建/s"
+        },
+        {
+          "refId": "B", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id) (tcp_established{agent_id=~\"$agent_id\"})",
+          "legendFormat": "{{agent_id}} 当前 established"
+        }
+      ]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "上下文切换速率（eBPF）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "sum by (agent_id) (rate(sched_switches_total{agent_id=~\"$agent_id\"}[5m]))",
+          "legendFormat": "{{agent_id}}"
+        }
+      ]
+    },
+
+    { "type": "row", "title": "Saturation 饱和度", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 }, "collapsed": false, "panels": [] },
+
+    {
+      "id": 13, "type": "timeseries", "title": "CPU 使用率",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 52 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "avg by (agent_id) (cpu_usage_percent{agent_id=~\"$agent_id\"})",
+          "legendFormat": "{{agent_id}}"
+        }
+      ]
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "内存 / Swap 使用率",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 52 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "avg by (agent_id) (memory_usage_percent{type=\"virtual\", agent_id=~\"$agent_id\"})",
+          "legendFormat": "{{agent_id}} memory"
+        },
+        {
+          "refId": "B", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "avg by (agent_id) (memory_swap_usage_percent{agent_id=~\"$agent_id\"})",
+          "legendFormat": "{{agent_id}} swap"
+        }
+      ]
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "磁盘使用率（按挂载点）",
+      "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 52 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": false } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A", "range": true,
+          "datasource": { "type": "prometheus", "uid": "victoriametrics" },
+          "expr": "max by (agent_id, mountpoint, device) (disk_usage_percent{agent_id=~\"$agent_id\", fstype!~\"tmpfs|overlay|squashfs\"})",
+          "legendFormat": "{{agent_id}} {{mountpoint}}"
+        }
+      ]
+    }
+  ]
+}
