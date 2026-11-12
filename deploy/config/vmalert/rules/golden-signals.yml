@@ -1,0 +1,149 @@
+# 黄金信号（Four Golden Signals）告警规则
+# 数据来源：Kon-Agent eBPF/proc 采集端 → kon-agent-server → VictoriaMetrics
+# 指标/标签与采集端代码对应关系：
+#   cpu_usage_percent{mode="user"}                          internal/plugin/system/cpu
+#   memory_usage_percent{type="virtual"} 等                 internal/plugin/system/memory
+#   disk_usage_percent{device,mountpoint,fstype} 等         internal/plugin/system/disk
+#   network_*_total{interface,direction,protocol}           internal/plugin/network/ebpf
+#   tcp_rtt_seconds / packet_drops_total{reason} 等         internal/plugin/network/ebpf
+#   disk_io_latency_seconds{rw,cgroup} / disk_io_completed_total{device}
+#                                                           internal/plugin/block/ebpf
+#   cpu_runqueue_wait_seconds / sched_switches_total        internal/plugin/sched/ebpf
+# 所有序列统一带 agent_id / host_name / plugin 标签（server 端 convert.go 注入）。
+# 阈值均为经验起始值，按实际边缘设备水位调整。
+
+groups:
+  # ---------- 存活（数据面静默即事故） ----------
+  - name: golden-signals.availability
+    interval: 15s
+    rules:
+      - alert: AgentFleetDown
+        expr: absent_over_time(cpu_usage_percent[3m])
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "所有采集端停止上报"
+          description: "超过 3 分钟没有任何 agent 指标写入 VictoriaMetrics。优先检查 kon-agent-server（:7843/udp）与网络连通性。"
+          runbook_url: "https://example.com/runbooks/agent-fleet-down" # TODO: 替换为实际 runbook 链接
+      # 说明：按单个 agent_id 维度的静默检测依赖 server 自暴露 /metrics
+      #（计划 P1：已连接 agent 数），落地后补充 up 风格规则。
+
+  # ---------- 饱和度 Saturation ----------
+  - name: golden-signals.saturation
+    interval: 15s
+    rules:
+      - alert: HighCPUUsage
+        expr: avg by (agent_id, host_name) (cpu_usage_percent) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU 使用率偏高：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }}（{{ $labels.host_name }}）CPU 使用率 5 分钟均值 {{ $value | printf \"%.1f\" }}% > 85%。"
+          runbook_url: "https://example.com/runbooks/high-cpu"
+      - alert: HighCPUUsage
+        expr: avg by (agent_id, host_name) (cpu_usage_percent) > 95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CPU 使用率过高：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }}（{{ $labels.host_name }}）CPU 使用率 5 分钟均值 {{ $value | printf \"%.1f\" }}% > 95%。"
+          runbook_url: "https://example.com/runbooks/high-cpu"
+
+      - alert: HighMemoryUsage
+        expr: avg by (agent_id, host_name) (memory_usage_percent{type="virtual"}) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "内存使用率偏高：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }}（{{ $labels.host_name }}）内存使用率 {{ $value | printf \"%.1f\" }}% > 90%。"
+          runbook_url: "https://example.com/runbooks/high-memory"
+      - alert: HighMemoryUsage
+        expr: avg by (agent_id, host_name) (memory_usage_percent{type="virtual"}) > 97
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "内存使用率过高：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }}（{{ $labels.host_name }}）内存使用率 {{ $value | printf \"%.1f\" }}% > 97%，OOM 风险。"
+          runbook_url: "https://example.com/runbooks/high-memory"
+
+      - alert: HighDiskUsage
+        expr: max by (agent_id, host_name, device, mountpoint) (disk_usage_percent{fstype!~"tmpfs|overlay|squashfs"}) > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "磁盘使用率偏高：{{ $labels.agent_id }} {{ $labels.mountpoint }}"
+          description: "agent {{ $labels.agent_id }} 挂载点 {{ $labels.mountpoint }}（{{ $labels.device }}）使用率 {{ $value | printf \"%.1f\" }}% > 85%。"
+          runbook_url: "https://example.com/runbooks/high-disk"
+      - alert: HighDiskUsage
+        expr: max by (agent_id, host_name, device, mountpoint) (disk_usage_percent{fstype!~"tmpfs|overlay|squashfs"}) > 95
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "磁盘即将写满：{{ $labels.agent_id }} {{ $labels.mountpoint }}"
+          description: "agent {{ $labels.agent_id }} 挂载点 {{ $labels.mountpoint }}（{{ $labels.device }}）使用率 {{ $value | printf \"%.1f\" }}% > 95%。"
+          runbook_url: "https://example.com/runbooks/high-disk"
+
+  # ---------- 延迟 Latency（eBPF 直方图，服务端已转为 _bucket/_sum/_count 累积序列） ----------
+  - name: golden-signals.latency
+    interval: 15s
+    rules:
+      - alert: HighTCPRTT
+        expr: histogram_quantile(0.99, sum by (le, agent_id, host_name) (rate(tcp_rtt_seconds_bucket[5m]))) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TCP RTT p99 偏高：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }} TCP RTT p99 = {{ $value | printf \"%.3f\" }}s > 300ms，链路质量劣化或拥塞。"
+          runbook_url: "https://example.com/runbooks/high-rtt"
+
+      - alert: HighDiskIOLatency
+        expr: histogram_quantile(0.99, sum by (le, agent_id, host_name) (rate(disk_io_latency_seconds_bucket[5m]))) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "磁盘 IO 延迟 p99 偏高：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }} 块设备 IO 延迟 p99 = {{ $value | printf \"%.3f\" }}s > 100ms，磁盘饱和或慢盘。"
+          runbook_url: "https://example.com/runbooks/high-io-latency"
+
+      - alert: HighRunqueueWait
+        expr: histogram_quantile(0.99, sum by (le, agent_id, host_name) (rate(cpu_runqueue_wait_seconds_bucket[5m]))) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU 运行队列等待 p99 偏高：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }} runqueue 等待 p99 = {{ $value | printf \"%.3f\" }}s > 50ms，CPU 竞争饱和（/proc 看不到的指标，eBPF 独有视角）。"
+          runbook_url: "https://example.com/runbooks/high-runqueue"
+
+  # ---------- 错误 Errors ----------
+  - name: golden-signals.errors
+    interval: 15s
+    rules:
+      - alert: TCPRetransmitStorm
+        expr: sum by (agent_id, host_name) (rate(tcp_retransmissions_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TCP 重传速率偏高：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }} TCP 重传 {{ $value | printf \"%.1f\" }} 次/s 持续 5 分钟，链路丢包或对端异常。"
+          runbook_url: "https://example.com/runbooks/tcp-retrans"
+
+      - alert: PacketDrops
+        expr: sum by (agent_id, host_name, reason) (rate(packet_drops_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "内核丢包：{{ $labels.agent_id }} 原因 {{ $labels.reason }}"
+          description: "agent {{ $labels.agent_id }} 丢包速率 {{ $value | printf \"%.1f\" }} pps（reason={{ $labels.reason }}）。"
+          runbook_url: "https://example.com/runbooks/packet-drops"

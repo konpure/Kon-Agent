@@ -1,0 +1,15 @@
+# Grafana 仪表盘 provisioning：加载 /etc/grafana/dashboards 下的 JSON
+apiVersion: 1
+
+providers:
+  - name: kon-agent
+    orgId: 1
+    folder: "Kon-Agent"
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true # UI 中的修改允许保留（容器重建后以文件为准）
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

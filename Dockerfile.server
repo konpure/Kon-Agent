@@ -1,0 +1,34 @@
+# Multi-stage build for the Kon-Agent QUIC receiver server.
+#
+# Unlike the agent, the server is pure Go: no eBPF objects, no kernel
+# headers, so the build needs nothing beyond the Go toolchain.
+#
+# Build (from repo root):
+#   docker build -f Dockerfile.server -t kon-agent-server:latest .
+# Optional build args for slow default sources:
+#   --build-arg GOPROXY=https://goproxy.cn,direct
+
+# ---------- builder ----------
+FROM golang:1.24-bookworm AS builder
+
+ARG GOPROXY=""
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN if [ -n "$GOPROXY" ]; then go env -w GOPROXY="$GOPROXY"; fi && go mod download
+COPY . .
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+    -o /out/kon-agent-server ./server/main
+
+# ---------- runtime ----------
+FROM debian:bookworm-slim
+
+WORKDIR /app
+COPY --from=builder /out/kon-agent-server /app/kon-agent-server
+
+# QUIC ingest endpoint (UDP). Override -vm to point at VictoriaMetrics;
+# empty -vm means print-only mode.
+EXPOSE 7843/udp
+ENTRYPOINT ["/app/kon-agent-server"]
+CMD ["-vm", "http://localhost:8428"]
