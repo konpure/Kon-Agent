@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "vmalert") }}
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "vmalert") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kon-agent-stack.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: vmalert
+  template:
+    metadata:
+      labels:
+        {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "vmalert") | nindent 8 }}
+    spec:
+      {{- include "kon-agent-stack.pullSecrets" (dict "context" $) | nindent 6 }}
+      containers:
+        - name: vmalert
+          image: {{ include "kon-agent-stack.image" (dict "values" .Values.vmalert "context" $) }}
+          imagePullPolicy: {{ .Values.vmalert.image.pullPolicy }}
+          args:
+            # 查询 VM 评估规则
+            - -datasource.url={{ include "kon-agent-stack.vmUrl" (dict "context" $) }}
+            # recording rules 结果回写 VM
+            - -remoteWrite.url={{ include "kon-agent-stack.vmUrl" (dict "context" $) }}
+            # 告警发往 Alertmanager（vmalert 自动补全 /api/v2/alerts 路径）
+            - -notifier.url=http://{{ include "kon-agent-stack.componentName" (dict "context" $ "component" "alertmanager") }}:{{ .Values.alertmanager.service.port }}
+            - -rule=/etc/vmalert/rules/*.yml
+            - -evaluationInterval={{ .Values.vmalert.evaluationInterval }}
+            - -httpListenAddr=:{{ .Values.vmalert.service.port }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.vmalert.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.vmalert.resources | nindent 12 }}
+          volumeMounts:
+            - name: rules
+              mountPath: /etc/vmalert/rules
+              readOnly: true
+      volumes:
+        - name: rules
+          configMap:
+            name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "vmalert") }}-rules
