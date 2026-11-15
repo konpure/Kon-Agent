@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "grafana") }}
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "grafana") | nindent 4 }}
+spec:
+  type: {{ .Values.grafana.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.grafana.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- if and (eq .Values.grafana.service.type "NodePort") .Values.grafana.service.nodePort }}
+      nodePort: {{ .Values.grafana.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "kon-agent-stack.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: grafana

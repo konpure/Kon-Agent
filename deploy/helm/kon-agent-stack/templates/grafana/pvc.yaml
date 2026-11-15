@@ -1,0 +1,17 @@
+{{- if .Values.grafana.storage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kon-agent-stack.fullname" . }}-grafana
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "grafana") | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.grafana.storage.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.grafana.storage.size }}
+{{- end }}
