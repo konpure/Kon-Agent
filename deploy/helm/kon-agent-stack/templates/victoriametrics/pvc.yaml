@@ -1,0 +1,17 @@
+{{- if .Values.victoriaMetrics.storage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kon-agent-stack.fullname" . }}-victoria-metrics
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "victoria-metrics") | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.victoriaMetrics.storage.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.victoriaMetrics.storage.size }}
+{{- end }}

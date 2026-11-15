@@ -1,0 +1,9 @@
+apiVersion: v2
+name: kon-agent-stack
+description: >
+  Kon-Agent SRE 服务端栈：VictoriaMetrics（存储）+ vmalert（规则评估）
+  + Alertmanager（告警路由）+ Grafana（可视化）+ kon-agent-server（QUIC 接收端）。
+  采集端（edge-agent）不在本 chart 范围内，由 kon-agent-operator 管理。
+type: application
+version: 0.1.0
+appVersion: "v1.155.0"

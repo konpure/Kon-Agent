@@ -1,0 +1,123 @@
+# Kon-Agent SRE 服务端栈 · values
+# 镜像地址 = global.imageRegistry / <component>.image.repository : <component>.image.tag
+# 与 deploy/docker-compose/.env.example 保持同一套版本号约定。
+
+# ===== 全局 =====
+global:
+  # 镜像仓库前缀（腾讯云 CCR 个人版：ccr.ccs.tencentyun.com/<命名空间>）。
+  # 置空则直接用上游镜像名（配合 kind/minikube 本地调试）。
+  imageRegistry: ccr.ccs.tencentyun.com/konpure
+  # CCR 命名空间为"私有"访问级别时填写，如：
+  #   [{name: ccr-secret}]   # kubectl create secret docker-registry ccr-secret ...
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ===== VictoriaMetrics（存储，L4）=====
+victoriaMetrics:
+  image:
+    repository: victoria-metrics
+    tag: v1.155.0
+    pullPolicy: IfNotPresent
+  retentionPeriod: 90d
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  storage:
+    enabled: true
+    size: 20Gi
+    # 空则使用集群默认 StorageClass（腾讯云 TKE 为 cbs）
+    storageClassName: ""
+  service:
+    type: ClusterIP
+    port: 8428
+
+# ===== kon-agent-server（QUIC 接收端，L3）=====
+server:
+  image:
+    repository: kon-agent-server
+    # 建议用 git short sha 固定版本；latest + Always 便于演示环境滚动更新
+    tag: latest
+    pullPolicy: IfNotPresent
+  # 累加器为进程内存态（delta→cumulative），滚动更新会造成 counter 链断裂，
+  # 因此用 Recreate：短暂中断由采集端 WAL 兜底补传（采集永不阻塞设计）
+  updateStrategy: Recreate
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  service:
+    # agent 在集群外，需要节点级可达：NodePort（默认）或 LoadBalancer（腾讯云 CLB UDP 监听器）
+    type: NodePort
+    port: 7843
+    nodePort: 30784
+
+# ===== vmalert（规则评估，L5）=====
+vmalert:
+  image:
+    repository: vmalert
+    tag: v1.155.0
+    pullPolicy: IfNotPresent
+  evaluationInterval: 15s
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 8880
+
+# ===== Alertmanager（告警路由，L5）=====
+alertmanager:
+  image:
+    repository: alertmanager
+    tag: v0.34.2
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 9093
+
+# ===== Grafana（可视化，L6）=====
+grafana:
+  image:
+    repository: grafana
+    tag: "13.3.0"
+    pullPolicy: IfNotPresent
+  adminUser: admin
+  # 生产建议改用 existingSecret（key: admin-password）
+  adminPassword: admin
+  existingSecret: ""
+  service:
+    type: NodePort
+    port: 3000
+    nodePort: 30300
+  # 面板/数据源由 provisioning 提供，无需持久化；开启仅用于保存 UI 侧改动
+  storage:
+    enabled: false
+    size: 5Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
