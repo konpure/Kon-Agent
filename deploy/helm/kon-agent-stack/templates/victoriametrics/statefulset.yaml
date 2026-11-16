@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "victoria-metrics") }}
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "victoria-metrics") | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "victoria-metrics") }}
+  selector:
+    matchLabels:
+      {{- include "kon-agent-stack.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: victoria-metrics
+  template:
+    metadata:
+      labels:
+        {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "victoria-metrics") | nindent 8 }}
+    spec:
+      {{- include "kon-agent-stack.pullSecrets" (dict "context" $) | nindent 6 }}
+      containers:
+        - name: victoria-metrics
+          image: {{ include "kon-agent-stack.image" (dict "values" .Values.victoriaMetrics "context" $) }}
+          imagePullPolicy: {{ .Values.victoriaMetrics.image.pullPolicy }}
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod={{ .Values.victoriaMetrics.retentionPeriod }}
+            - -httpListenAddr=:{{ .Values.victoriaMetrics.service.port }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.victoriaMetrics.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.victoriaMetrics.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /storage
+{{- if .Values.victoriaMetrics.storage.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- with .Values.victoriaMetrics.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.victoriaMetrics.storage.size }}
+{{- else }}
+      volumes:
+        - name: data
+          emptyDir: {}
+{{- end }}

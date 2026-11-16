@@ -1,0 +1,36 @@
+{{ .Chart.Name }} 服务端栈已部署到命名空间 "{{ .Release.Namespace }}"
+
+==== 访问入口 ====
+
+Grafana（黄金信号仪表盘：Kon-Agent 文件夹）:
+{{- if eq .Values.grafana.service.type "NodePort" }}
+  http://<节点IP>:{{ .Values.grafana.service.nodePort }}    账号: {{ .Values.grafana.adminUser }}
+{{- else if eq .Values.grafana.service.type "LoadBalancer" }}
+  kubectl -n {{ .Release.Namespace }} get svc {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "grafana") }}   # 获取 EXTERNAL-IP
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kon-agent-stack.componentName" (dict "context" $ "component" "grafana") }} 3000:{{ .Values.grafana.service.port }}
+  然后访问 http://localhost:3000
+{{- end }}
+
+vmalert 规则/告警状态:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kon-agent-stack.componentName" (dict "context" $ "component" "vmalert") }} 8880:{{ .Values.vmalert.service.port }}
+
+Alertmanager:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kon-agent-stack.componentName" (dict "context" $ "component" "alertmanager") }} 9093:{{ .Values.alertmanager.service.port }}
+
+VictoriaMetrics:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kon-agent-stack.componentName" (dict "context" $ "component" "victoria-metrics") }} 8428:{{ .Values.victoriaMetrics.service.port }}
+
+==== 采集端接入（kon-agent-operator）====
+
+在 KonAgent CR 的 spec.server 中填写：
+{{- if eq .Values.server.service.type "NodePort" }}
+  server: "quic://<节点IP>:{{ .Values.server.service.nodePort }}"
+{{- else if eq .Values.server.service.type "LoadBalancer" }}
+  server: "quic://<LoadBalancer 外部地址>:{{ .Values.server.service.port }}"
+{{- else }}
+  # ClusterIP 仅限集群内使用，集群外 agent 无法接入
+  server: "quic://{{ include "kon-agent-stack.componentName" (dict "context" $ "component" "server") }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.server.service.port }}"
+{{- end }}
+
+注意：QUIC 基于 UDP，云安全组需放行对应 UDP 端口入站。

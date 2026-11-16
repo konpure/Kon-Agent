@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "grafana") }}-datasources
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "grafana") | nindent 4 }}
+data:
+  victoria.yml: |-
+    # Grafana 数据源 provisioning：VictoriaMetrics（url 由模板渲染为集群内 Service）
+    apiVersion: 1
+
+    datasources:
+      - name: VictoriaMetrics
+        uid: victoriametrics
+        type: prometheus
+        access: proxy
+        url: {{ include "kon-agent-stack.vmUrl" (dict "context" $) }}
+        isDefault: true
+        editable: true
+        jsonData:
+          httpMethod: POST
+          timeInterval: 5s

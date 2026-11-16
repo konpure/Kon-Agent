@@ -1,0 +1,18 @@
+services:
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:${VM_VERSION:-v1.155.0}
+
+  vmalert:
+    image: victoriametrics/vmalert:${VMALERT_VERSION:-v1.155.0}
+
+  alertmanager:
+    image: prom/alertmanager:${ALERTMANAGER_VERSION:-v0.34.2}
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-13.3.0}
+
+  kon-agent-server:
+    image: kon-agent-server:local
+
+  edge-agent:
+    image: kon-edge-agent:local

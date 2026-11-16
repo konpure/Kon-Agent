@@ -1,0 +1,129 @@
+name: kon-agent-stack
+
+networks:
+  kon-agent:
+    driver: bridge
+
+volumes:
+  vmdata:        # VictoriaMetrics 时序数据
+  amdata:        # Alertmanager 静默/通知状态
+  grafana-data:  # Grafana 用户/组织等运行时状态（仪表盘由 provisioning 挂载）
+
+services:
+  victoria-metrics:
+    image: ${CCR_REGISTRY:-ccr.ccs.tencentyun.com/konpure}/victoria-metrics:${VM_VERSION:-v1.155.0}
+    container_name: kon-victoria-metrics
+    command:
+      - -storageDataPath=/storage
+      - -retentionPeriod=${VM_RETENTION_PERIOD:-90d}
+      - -httpListenAddr=:8428
+    ports:
+      - "${VM_PORT:-8428}:8428"
+    volumes:
+      - vmdata:/storage
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8428/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+    networks: [kon-agent]
+
+  kon-agent-server:
+    image: ${CCR_REGISTRY:-ccr.ccs.tencentyun.com/konpure}/kon-agent-server:${KON_AGENT_SERVER_VERSION:-latest}
+    build:
+      context: ../..
+      dockerfile: Dockerfile.server
+      args:
+        GOPROXY: ${GOPROXY:-}
+    container_name: kon-agent-server
+    command: ["-vm", "http://victoria-metrics:8428"]
+    ports:
+      # QUIC 基于 UDP，必须显式 /udp
+      - "${SERVER_QUIC_PORT:-7843}:7843/udp"
+    depends_on:
+      victoria-metrics:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [kon-agent]
+
+  vmalert:
+    image: ${CCR_REGISTRY:-ccr.ccs.tencentyun.com/konpure}/vmalert:${VMALERT_VERSION:-v1.155.0}
+    container_name: kon-vmalert
+    command:
+      - -datasource.url=http://victoria-metrics:8428
+      - -remoteWrite.url=http://victoria-metrics:8428
+      - -notifier.url=http://alertmanager:9093
+      - -rule=/etc/vmalert/rules/*.yml
+      - -evaluationInterval=15s
+      - -httpListenAddr=:8880
+    ports:
+      - "${VMALERT_PORT:-8880}:8880"
+    volumes:
+      - ../config/vmalert/rules:/etc/vmalert/rules:ro
+    depends_on:
+      victoria-metrics:
+        condition: service_healthy
+      alertmanager:
+        condition: service_started
+    restart: unless-stopped
+    networks: [kon-agent]
+
+  alertmanager:
+    image: ${CCR_REGISTRY:-ccr.ccs.tencentyun.com/konpure}/alertmanager:${ALERTMANAGER_VERSION:-v0.34.2}
+    container_name: kon-alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ../config/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - amdata:/alertmanager
+    restart: unless-stopped
+    networks: [kon-agent]
+
+  grafana:
+    image: ${CCR_REGISTRY:-ccr.ccs.tencentyun.com/konpure}/grafana:${GRAFANA_VERSION:-13.3.0}
+    container_name: kon-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../config/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      victoria-metrics:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [kon-agent]
+
+  # 可选：本地端到端演示用采集端（默认不启动）。
+  # 需要 Linux 主机、内核 BTF（/sys/kernel/btf）、privileged 加载 eBPF。
+  # host 网络下通过 quic://localhost:7843 连到本栈的 server。
+  edge-agent:
+    profiles: ["agent"]
+    image: ${CCR_REGISTRY:-ccr.ccs.tencentyun.com/konpure}/edge-agent:${EDGE_AGENT_VERSION:-latest}
+    build:
+      context: ../..
+      dockerfile: Dockerfile.agent
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        GOPROXY: ${GOPROXY:-}
+    container_name: kon-edge-agent
+    privileged: true
+    network_mode: host
+    pid: host
+    environment:
+      # gopsutil 读宿主机 /proc /sys，而不是容器自身的
+      HOST_PROC: /host/proc
+      HOST_SYS: /host/sys
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    restart: unless-stopped

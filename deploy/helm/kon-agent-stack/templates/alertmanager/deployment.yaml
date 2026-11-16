@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "alertmanager") }}
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "alertmanager") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kon-agent-stack.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: alertmanager
+  template:
+    metadata:
+      labels:
+        {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "alertmanager") | nindent 8 }}
+    spec:
+      {{- include "kon-agent-stack.pullSecrets" (dict "context" $) | nindent 6 }}
+      containers:
+        - name: alertmanager
+          image: {{ include "kon-agent-stack.image" (dict "values" .Values.alertmanager "context" $) }}
+          imagePullPolicy: {{ .Values.alertmanager.image.pullPolicy }}
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+          ports:
+            - name: http
+              containerPort: {{ .Values.alertmanager.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.alertmanager.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "alertmanager") }}

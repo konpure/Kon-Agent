@@ -1,0 +1,80 @@
+# SLO burn-rate 告警规则
+#
+# 示例 SLI：网络传输质量 = 1 - TCP 重传率
+#   错误率 = tcp_retransmissions_total / network_packets_total{protocol="tcp"}
+#   目标 SLO：99.9% 的包不触发重传 → 错误预算 0.1%（0.001）
+#
+# 采用 Google SRE 多窗口多燃尽率模型：
+#   fast-burn：短窗口(5m) + 长窗口(1h) 同时超 14.4x 预算 → 2% 预算/小时，立即告警
+#   slow-burn：短窗口(30m) + 长窗口(6h) 同时超 6x 预算   → 预警，排查趋势
+#
+# 注意：这是占位 SLO，用于跑通 "SLI → recording rules → burn rate 告警" 全链路。
+# 待 P1「server 自暴露 /metrics」（已连接 agent 数、解码错误、VM 写入失败）落地后，
+# 应替换为数据面可用性 SLO（成功写入样本 / 应到样本），更贴合系统本职。
+# 后续可用 Sloth 管理 SLO 清单并自动生成此类规则。
+
+groups:
+  # ---------- SLI recording rules：预计算各窗口错误率，供告警与仪表盘复用 ----------
+  - name: slo.network-quality.recording
+    interval: 30s
+    rules:
+      - record: sli:network_retransmit_ratio:rate5m
+        expr: |
+          sum by (agent_id, host_name) (rate(tcp_retransmissions_total[5m]))
+            /
+          sum by (agent_id, host_name) (rate(network_packets_total{protocol="tcp"}[5m]))
+      - record: sli:network_retransmit_ratio:rate30m
+        expr: |
+          sum by (agent_id, host_name) (rate(tcp_retransmissions_total[30m]))
+            /
+          sum by (agent_id, host_name) (rate(network_packets_total{protocol="tcp"}[30m]))
+      - record: sli:network_retransmit_ratio:rate1h
+        expr: |
+          sum by (agent_id, host_name) (rate(tcp_retransmissions_total[1h]))
+            /
+          sum by (agent_id, host_name) (rate(network_packets_total{protocol="tcp"}[1h]))
+      - record: sli:network_retransmit_ratio:rate6h
+        expr: |
+          sum by (agent_id, host_name) (rate(tcp_retransmissions_total[6h]))
+            /
+          sum by (agent_id, host_name) (rate(network_packets_total{protocol="tcp"}[6h]))
+
+  # ---------- burn rate 告警 ----------
+  - name: slo.network-quality.alerts
+    interval: 30s
+    rules:
+      - alert: NetworkQualitySLOBurnRateFast
+        expr: |
+          (
+            sli:network_retransmit_ratio:rate1h > (14.4 * 0.001)
+          )
+          and
+          (
+            sli:network_retransmit_ratio:rate5m > (14.4 * 0.001)
+          )
+        for: 2m
+        labels:
+          severity: critical
+          slo: network-quality
+        annotations:
+          summary: "网络质量 SLO 快速燃尽：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }} TCP 重传率 5m/1h 双窗口超过错误预算的 14.4 倍（SLO 99.9%），按此速度 2% 预算/小时耗尽。"
+          runbook_url: "https://example.com/runbooks/network-quality-slo" # TODO: 替换为实际 runbook 链接
+
+      - alert: NetworkQualitySLOBurnRateSlow
+        expr: |
+          (
+            sli:network_retransmit_ratio:rate6h > (6 * 0.001)
+          )
+          and
+          (
+            sli:network_retransmit_ratio:rate30m > (6 * 0.001)
+          )
+        for: 15m
+        labels:
+          severity: warning
+          slo: network-quality
+        annotations:
+          summary: "网络质量 SLO 慢速燃尽：{{ $labels.agent_id }}"
+          description: "agent {{ $labels.agent_id }} TCP 重传率 30m/6h 双窗口超过错误预算的 6 倍，预算趋势性消耗，建议排查链路。"
+          runbook_url: "https://example.com/runbooks/network-quality-slo"

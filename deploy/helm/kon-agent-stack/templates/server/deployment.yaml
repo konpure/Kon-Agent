@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "server") }}
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "server") | nindent 4 }}
+spec:
+  replicas: 1
+  # delta→cumulative 累加器是进程内存态，滚动更新会造成 counter 链断裂；
+  # Recreate 的短暂中断由采集端 WAL 兜底补传
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kon-agent-stack.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "server") | nindent 8 }}
+    spec:
+      {{- include "kon-agent-stack.pullSecrets" (dict "context" $) | nindent 6 }}
+      containers:
+        - name: kon-agent-server
+          image: {{ include "kon-agent-stack.image" (dict "values" .Values.server "context" $) }}
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          # 注意：接收端目前无任何 HTTP 健康端点（P1 计划的自暴露 /metrics 落地后
+          # 补 liveness/readiness 探针与 UDP 健康检查），因此此处刻意不配置 probe
+          args:
+            - -vm={{ include "kon-agent-stack.vmUrl" (dict "context" $) }}
+          ports:
+            - name: quic
+              containerPort: {{ .Values.server.service.port }}
+              protocol: UDP
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}

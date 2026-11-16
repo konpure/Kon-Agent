@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kon-agent-stack.componentName" (dict "context" $ "component" "server") }}
+  labels:
+    {{- include "kon-agent-stack.componentLabels" (dict "context" $ "component" "server") | nindent 4 }}
+spec:
+  type: {{ .Values.server.service.type }}
+  ports:
+    - name: quic
+      port: {{ .Values.server.service.port }}
+      targetPort: quic
+      # QUIC 基于 UDP，protocol 必须显式声明
+      protocol: UDP
+      {{- if and (eq .Values.server.service.type "NodePort") .Values.server.service.nodePort }}
+      nodePort: {{ .Values.server.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "kon-agent-stack.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: server
